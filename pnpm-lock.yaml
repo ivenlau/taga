@@ -183,6 +183,21 @@ importers:
         specifier: 0.8.0
         version: 0.8.0
 
+  packages/session:
+    dependencies:
+      '@taga/context':
+        specifier: workspace:*
+        version: link:../context
+      '@taga/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@taga/retrieval':
+        specifier: workspace:*
+        version: link:../retrieval
+      '@taga/storage':
+        specifier: workspace:*
+        version: link:../storage
+
   packages/storage:
     dependencies:
       '@taga/domain':

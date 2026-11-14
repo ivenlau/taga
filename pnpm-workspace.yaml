@@ -2,3 +2,8 @@ packages:
   - apps/*
   - packages/*
 ignoreScripts: false
+onlyBuiltDependencies:
+  - "@zvec/zvec"
+  - better-sqlite3
+  - onnxruntime-node
+  - protobufjs
