@@ -66,7 +66,12 @@ function clip(text: string): string {
 }
 
 function parseJsonObject(text: string): unknown {
-  const trimmed = text.trim().replace(/^```(?:json)?/u, '').replace(/```$/u, '').trim();
+  const trimmed = text
+    .replace(/<think>[\s\S]*?<\/think>/giu, '')
+    .trim()
+    .replace(/^```(?:json)?\s*/iu, '')
+    .replace(/\s*```$/u, '')
+    .trim();
   try {
     return JSON.parse(trimmed) as unknown;
   } catch {

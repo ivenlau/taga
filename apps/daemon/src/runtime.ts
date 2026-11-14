@@ -11,6 +11,7 @@ import { MarkdownMemoryRepository } from '../../../packages/storage/src/index.js
 import { DatabaseStore, type JobRecord } from '../../../packages/storage/src/index.js';
 import { semanticJobHandlers } from './semantic.js';
 import { consolidationJobHandlers } from './consolidation.js';
+import { buildDistillerChain } from './llm-chain.js';
 import {
   DaemonLease,
   stopRequested,
@@ -202,7 +203,7 @@ export function defaultJobHandlers(brainPath: string, database: DatabaseStore): 
       const payload = JSON.parse(job.payload) as { projectId?: string; sessionId?: string };
       await new AutomaticDistillationService(
         database,
-        undefined,
+        buildDistillerChain({ audit }),
         undefined,
         {
           audit,

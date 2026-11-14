@@ -8,6 +8,8 @@ export {
   scopeWeight,
 } from './governance.js';
 export { SqliteAuditLog } from './sqlite-audit.js';
+export { llmConfigFromEnv } from './llm.js';
+export type { LlmConfig, LlmMode } from './llm.js';
 export {
   CONSOLIDATION_JOB_KIND,
   consolidationConfigFromEnv,

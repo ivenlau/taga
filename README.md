@@ -163,6 +163,32 @@ TAGA_LLM_TIMEOUT_MS=3000
 
 MCP `memory_search` 支持显式 `include_draft: true`（CLI 为 `memory search --include-draft`），draft 结果以 `status:draft:unverified` 标记并降权 0.5。默认召回与静态 Context Pack 仍仅包含 active 记忆。搜索结果的 `proof` 字段与 `proof:useful:N` / `proof:verified` match-reason 标记展示每条记忆的反馈佐证，供调用方自行加权。
 
+## LLM 适配（可选）
+
+Taga 的 LLM 能力默认关闭。设置以下环境变量后，OpenAI 兼容端点会驱动两个消费点：
+
+- **会话日志蒸馏**（`distill.auto`）：candidate 质量从确定性规则升级为 LLM 提炼
+- **记忆整合裁决**（consolidation）：重叠区间 draft 的 merge-or-keep 由 LLM 裁决
+
+```bash
+TAGA_LLM_MODE=off            # off（默认）| shadow | on
+TAGA_LLM_ENDPOINT=           # OpenAI 兼容地址，如 http://127.0.0.1:11434/v1/chat/completions（Ollama）
+TAGA_LLM_API_KEY=
+TAGA_LLM_MODEL=
+TAGA_LLM_TIMEOUT_MS=30000
+TAGA_LLM_PROVIDER_NAME=openai-compatible
+```
+
+| 模式 | 行为 |
+|---|---|
+| `off` | 不调用 LLM，蒸馏与整合全部走确定性路径 |
+| `shadow` | 确定性结果照旧生效；LLM 双跑，对比结果写 `distill.llm_shadow` 审计事件——用于上线前评估质量 |
+| `on` | LLM 为主，失败自动回退确定性路径并写 `distill.llm_fallback` 审计；consolidation 裁决启用 |
+
+**隐私提示**：`TAGA_LLM_MODE=on/shadow` 时，脱敏后的会话观察内容会发送到 `TAGA_LLM_ENDPOINT`。指向本地 Ollama 时数据不出机器；指向云端服务时请自行确认该端点的数据处理政策。发送前不做额外变换，行为可预测。
+
+candidate 的 model trace（provider/model/mode/tokens/latency）与审计事件共同构成 LLM 调用的完整可观测性。
+
 ## 可选 Reranker
 
 Taga 支持 Transformers.js 可加载的 `bge-reranker-v2-m3` ONNX 模型：

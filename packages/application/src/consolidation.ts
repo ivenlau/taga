@@ -1,5 +1,6 @@
 import type { DatabaseStore } from '../../storage/src/index.js';
 import type { ProactivePolicy } from './policy.js';
+import { llmConfigFromEnv } from './llm.js';
 
 export const CONSOLIDATION_JOB_KIND = 'consolidation.scan';
 
@@ -33,16 +34,13 @@ export function consolidationConfigFromEnv(env: NodeJS.ProcessEnv = process.env)
 }
 
 function consolidationLlmConfigFromEnv(env: NodeJS.ProcessEnv): ConsolidationLlmConfig | undefined {
-  if (env.TAGA_LLM_MODE !== 'on') return undefined;
-  const endpoint = env.TAGA_LLM_ENDPOINT;
-  const model = env.TAGA_LLM_MODEL;
-  if (endpoint === undefined || endpoint.length === 0 || model === undefined || model.length === 0) return undefined;
-  const apiKey = env.TAGA_LLM_API_KEY;
+  const config = llmConfigFromEnv(env);
+  if (config.mode !== 'on') return undefined;
   return {
-    endpoint,
-    ...(apiKey === undefined || apiKey.length === 0 ? {} : { apiKey }),
-    model,
-    timeoutMs: positiveInt(env.TAGA_LLM_TIMEOUT_MS, 3_000),
+    endpoint: config.endpoint,
+    ...(config.apiKey === undefined ? {} : { apiKey: config.apiKey }),
+    model: config.model,
+    timeoutMs: config.timeoutMs,
   };
 }
 

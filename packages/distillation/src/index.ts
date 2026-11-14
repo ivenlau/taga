@@ -190,8 +190,32 @@ export class FetchOpenAiCompatibleProvider implements StructuredCompletionProvid
     });
     if (!response.ok) throw new Error(`LLM provider returned HTTP ${response.status}`);
     const payload: unknown = await response.json();
-    return { text: readOpenAiText(payload), latencyMs: Date.now() - started };
+    return {
+      text: readOpenAiText(payload),
+      latencyMs: Date.now() - started,
+      ...readOpenAiUsage(payload),
+    };
   }
+}
+
+export function createLlmProvider(config: { readonly mode: 'off' | 'shadow' | 'on'; readonly endpoint: string; readonly apiKey?: string }): StructuredCompletionProvider | undefined {
+  if (config.mode === 'off' || config.endpoint.length === 0) return undefined;
+  return new FetchOpenAiCompatibleProvider({
+    endpoint: config.endpoint,
+    ...(config.apiKey === undefined ? {} : { apiKey: config.apiKey }),
+  });
+}
+
+function readOpenAiUsage(payload: unknown): { readonly inputTokens?: number; readonly outputTokens?: number } {
+  if (typeof payload !== 'object' || payload === null) return {};
+  const usage = (payload as Record<string, unknown>).usage;
+  if (typeof usage !== 'object' || usage === null) return {};
+  const inputTokens = (usage as Record<string, unknown>).prompt_tokens;
+  const outputTokens = (usage as Record<string, unknown>).completion_tokens;
+  return {
+    ...(typeof inputTokens === 'number' ? { inputTokens } : {}),
+    ...(typeof outputTokens === 'number' ? { outputTokens } : {}),
+  };
 }
 
 export class FallbackDistiller implements Distiller {
@@ -683,8 +707,26 @@ function buildLlmUserPrompt(input: DistillationInput): string {
 }
 
 function parseLlmDraft(text: string): LlmDraft {
-  const normalized = text.trim().replace(/^```(?:json)?\s*/iu, '').replace(/\s*```$/u, '').trim();
-  return llmDraftSchema.parse(JSON.parse(normalized) as unknown);
+  return llmDraftSchema.parse(parseJsonObjectPayload(text));
+}
+
+function parseJsonObjectPayload(text: string): unknown {
+  const withoutThinking = text
+    .replace(/<think>[\s\S]*?<\/think>/giu, '')
+    .trim()
+    .replace(/^```(?:json)?\s*/iu, '')
+    .replace(/\s*```$/u, '')
+    .trim();
+  try {
+    return JSON.parse(withoutThinking) as unknown;
+  } catch {
+    const start = withoutThinking.indexOf('{');
+    const end = withoutThinking.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      return JSON.parse(withoutThinking.slice(start, end + 1)) as unknown;
+    }
+    throw new Error('LLM response did not contain a JSON object');
+  }
 }
 
 function validateDraftSources(draft: LlmDraft, evidence: readonly EvidenceEvent[]): void {
