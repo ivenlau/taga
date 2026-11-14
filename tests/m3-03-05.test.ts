@@ -8,7 +8,7 @@ import {
   InMemoryMemoryRepository,
   SqliteAuditLog,
 } from '../packages/application/src/index.js';
-import { LiteMcpServer } from '../apps/mcp/src/index.js';
+import { LiteMcpServer, type McpResponse } from '../apps/mcp/src/index.js';
 import { parseCandidate, parseMemory, type Memory } from '../packages/domain/src/index.js';
 import { AutomaticDistillationService } from '../packages/distillation/src/index.js';
 import { MetricsService } from '../packages/metrics/src/index.js';
@@ -19,6 +19,12 @@ import { DatabaseStore, writeMarkdownDocument } from '../packages/storage/src/in
 import { createTemporaryDirectory } from '../packages/testkit/src/index.js';
 
 const timestamp = '2026-11-12T12:00:00.000Z';
+
+async function callMcp(server: LiteMcpServer, request: unknown): Promise<McpResponse> {
+  const response = await server.handle(request);
+  if (response === null) throw new Error('unexpected notification response');
+  return response;
+}
 
 describe('M3-03 notification policy', () => {
   it('deduplicates findings and applies ignore backoff with auditable feedback', async () => {
@@ -159,7 +165,7 @@ describe('M3-04 memory precheck', () => {
     const item = memory('mcp-precheck', 'lessons', [{ kind: 'file', locator: sourcePath }], 'Bounded retry rule');
     await writeMarkdownDocument(join(fixture.path, 'lessons', 'project', 'project-1', `${item.id}.md`), item, item.summary);
     const server = new LiteMcpServer(fixture.path);
-    const response = await server.handle({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'memory_precheck', arguments: { file: sourcePath, task: 'bounded retry', project_id: 'project-1' } } });
+    const response = await callMcp(server, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'memory_precheck', arguments: { file: sourcePath, task: 'bounded retry', project_id: 'project-1' } } });
     expect(response.error).toBeUndefined();
     expect(JSON.stringify(response.result)).toContain('mcp-precheck');
     await fixture.cleanup();

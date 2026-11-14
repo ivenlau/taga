@@ -167,6 +167,18 @@ const requestSchema = z.object({
   method: z.string().min(1),
 });
 
+const notificationSchema = z.object({
+  jsonrpc: z.literal('2.0'),
+  method: z.string().min(1),
+});
+
+const initializeSchema = z.object({
+  jsonrpc: z.literal('2.0'),
+  id: z.union([z.string(), z.number(), z.null()]),
+  method: z.literal('initialize'),
+  params: z.object({ protocolVersion: z.string().min(1).optional() }).optional(),
+});
+
 export interface McpTool {
   readonly name: string;
   readonly version: 'v1';
@@ -202,6 +214,47 @@ const tools: readonly McpTool[] = [
   { name: 'brain_rebuild', version: 'v1', description: 'Rebuild derived Brain relations from canonical Markdown.' },
 ];
 
+const mcpProtocolVersion = '2025-06-18';
+const serverInfo = { name: 'taga-mcp', version: '0.1.0' } as const;
+
+const toolInputSchemas: Readonly<Record<string, z.ZodType | undefined>> = {
+  memory_search: searchInputSchema,
+  memory_timeline: timelineInputSchema,
+  memory_session_start: sessionStartInputSchema,
+  memory_session_observation: sessionObservationInputSchema,
+  memory_get: getInputSchema,
+  memory_record: recordInputSchema,
+  memory_feedback: feedbackInputSchema,
+  context_trace: contextTraceInputSchema,
+  memory_precheck: precheckInputSchema,
+  brain_tree: undefined,
+  brain_list: brainListInputSchema,
+  brain_summary: undefined,
+  brain_detail: brainDetailInputSchema,
+  brain_rebuild: undefined,
+};
+
+interface McpToolDefinition {
+  readonly name: string;
+  readonly description: string;
+  readonly inputSchema: unknown;
+}
+
+function mcpTools(): readonly McpToolDefinition[] {
+  return tools.map((tool) => {
+    const schema = toolInputSchemas[tool.name];
+    return {
+      name: tool.name,
+      description: tool.description,
+      inputSchema: schema === undefined ? { type: 'object', properties: {} } : z.toJSONSchema(schema, { io: 'input' }),
+    };
+  });
+}
+
+function toolCallResult(payload: unknown): { content: Array<{ type: 'text'; text: string }>; structuredContent: unknown } {
+  return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], structuredContent: payload };
+}
+
 export class LiteMcpServer {
   private semanticIndex: ZvecMemoryIndex | undefined;
   private semanticEmbedder: Embedder | undefined;
@@ -215,21 +268,38 @@ export class LiteMcpServer {
     this.semanticEmbedder = undefined;
   }
 
-  async handle(input: unknown): Promise<McpResponse> {
+  async handle(input: unknown): Promise<McpResponse | null> {
     const base = requestSchema.safeParse(input);
     if (!base.success) {
+      if (notificationSchema.safeParse(input).success) return null;
       return { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'invalid JSON-RPC request' } };
     }
+    if (base.data.method === 'initialize') {
+      const parsed = initializeSchema.safeParse(input);
+      const requested = parsed.success ? parsed.data.params?.protocolVersion : undefined;
+      return {
+        jsonrpc: '2.0',
+        id: base.data.id,
+        result: {
+          protocolVersion: requested ?? mcpProtocolVersion,
+          capabilities: { tools: { listChanged: false } },
+          serverInfo,
+        },
+      };
+    }
+    if (base.data.method === 'ping') {
+      return { jsonrpc: '2.0', id: base.data.id, result: {} };
+    }
     if (base.data.method === 'tools/list') {
-      return { jsonrpc: '2.0', id: base.data.id, result: { tools } };
+      return { jsonrpc: '2.0', id: base.data.id, result: { tools: mcpTools() } };
     }
     const call = toolCallSchema.safeParse(input);
     if (!call.success) {
       return { jsonrpc: '2.0', id: base.data.id, error: { code: -32601, message: 'unsupported method' } };
     }
     try {
-      const result = await this.callTool(call.data.params.name, call.data.params.arguments);
-      return { jsonrpc: '2.0', id: call.data.id, result };
+      const payload = await this.callTool(call.data.params.name, call.data.params.arguments);
+      return { jsonrpc: '2.0', id: call.data.id, result: toolCallResult(payload) };
     } catch (error) {
       return { jsonrpc: '2.0', id: call.data.id, error: { code: -32602, message: safeErrorMessage(error) } };
     }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { join } from 'node:path';
 import { runCli } from '../apps/cli/src/index.js';
-import { LiteMcpServer } from '../apps/mcp/src/index.js';
+import { LiteMcpServer, type McpResponse } from '../apps/mcp/src/index.js';
 import { contentHash, writeMarkdownDocument } from '../packages/storage/src/index.js';
 import { createTemporaryDirectory } from '../packages/testkit/src/index.js';
 import type { Memory } from '../packages/domain/src/index.js';
@@ -17,6 +17,12 @@ function streams(): { stdout: { value: string; write(chunk: string): void }; std
   const stdout = { value: '', write(chunk: string): void { stdout.value += chunk; } };
   const stderr = { value: '', write(chunk: string): void { stderr.value += chunk; } };
   return { stdout, stderr };
+}
+
+async function callMcp(server: LiteMcpServer, request: unknown): Promise<McpResponse> {
+  const response = await server.handle(request);
+  if (response === null) throw new Error('unexpected notification response');
+  return response;
 }
 
 describe('M1 fast path gate', () => {
@@ -37,9 +43,9 @@ describe('M1 fast path gate', () => {
     expect(await runCli(['context', 'preview', '--json', '--project=project-1', `--brain=${brain}`], { cwd: fixture.path, streams: preview })).toBe(0);
     expect(preview.stdout.value).toContain('Bound retries');
     const server = new LiteMcpServer(brain);
-    const search = await server.handle({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'memory_search', arguments: { query: 'retry', project_id: 'project-1' } } });
+    const search = await callMcp(server, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'memory_search', arguments: { query: 'retry', project_id: 'project-1' } } });
     expect(JSON.stringify(search.result)).toContain('m1-memory');
-    const get = await server.handle({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'memory_get', arguments: { memory_id: 'm1-memory', include_body: true } } });
+    const get = await callMcp(server, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'memory_get', arguments: { memory_id: 'm1-memory', include_body: true } } });
     expect(JSON.stringify(get.result)).toContain('retry body');
     expect(await runCli(['memory', 'forget', 'm1-memory', '--yes', `--brain=${brain}`], { cwd: fixture.path, streams: streams() })).toBe(0);
     await fixture.cleanup();
