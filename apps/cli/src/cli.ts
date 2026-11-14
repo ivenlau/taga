@@ -772,7 +772,11 @@ async function memoryCommand(
     const database = new DatabaseStore(context.databasePath);
     try {
       const provider = new FtsRetrievalProvider(database);
-      const input = { query, limit: numberOption(context.options, 'limit') ?? 10 };
+      const input = {
+        query,
+        limit: numberOption(context.options, 'limit') ?? 10,
+        ...(context.options.get('include-draft') === true ? { includeDraft: true } : {}),
+      };
       const mode = optionString(context.options, 'semantic-mode') ?? process.env.TAGA_SEMANTIC_MODE ?? 'off';
       const semantic = mode === 'off' ? undefined : createCliSemanticRetriever(context, database);
       const lexical = provider.searchSafe(input);

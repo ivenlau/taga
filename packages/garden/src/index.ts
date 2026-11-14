@@ -105,6 +105,32 @@ export class GardenService {
     }
   }
 
+  recordSemanticDuplicate(input: {
+    readonly draft: Memory;
+    readonly existing: Memory;
+    readonly score: number;
+    readonly threshold: number;
+    readonly verdict: 'duplicate' | 'merge';
+  }): GardenProposal {
+    const reason = input.verdict === 'duplicate'
+      ? `draft is a semantic near-duplicate of an active memory (cosine ${input.score.toFixed(4)})`
+      : `draft overlaps an active memory; merge review suggested (cosine ${input.score.toFixed(4)})`;
+    const candidate = proposal({
+      category: 'duplicate',
+      affectedIds: [input.draft.id, input.existing.id],
+      evidence: evidenceFor([input.draft, input.existing]),
+      score: input.score,
+      threshold: input.threshold,
+      reason,
+      suggestedAction: 'review_duplicate',
+      now: this.clock(),
+    });
+    const current = this.get(candidate.id);
+    if (current !== null) return current;
+    this.database.upsertMetadata(`garden:proposal:${candidate.id}`, JSON.stringify(candidate));
+    return candidate;
+  }
+
   get(id: string): GardenProposal | null {
     const value = this.database.getMetadata(`garden:proposal:${id}`);
     return value === null ? null : parseProposal(JSON.parse(value) as unknown);

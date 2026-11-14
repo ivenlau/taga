@@ -11,6 +11,8 @@ Taga 是一个本地优先、可审计、面向 AI Agent 的长期记忆框架�
 - FTS5 词法检索，以及 BGE-M3 + Zvec 本地语义检索。
 - 词法结果与语义结果通过 equal-weight Reciprocal Rank Fusion（equal-RRF）融合。
 - 可选的 `bge-reranker-v2-m3` cross-encoder 重排，并在失败时回退 RRF。
+- 可选的后台自动整合：embedding 语义去重、useful 反馈驱动的 draft 自动晋升，全部审计可回溯。
+- 可选的 OpenAI 兼容 LLM 插槽，用于重复记忆的 merge-or-keep 裁决。
 - Session-start Context Pack、缓存失效和完整 session observation timeline。
 - CLI、JSON Lines MCP 进程和后台 daemon。
 - Claude Code、Codex、pi、OpenCode 等 Agent 适配基础设施。
@@ -125,6 +127,34 @@ TAGA_RERANK_MODE=off
 
 该配置会启用 BGE-M3 + Zvec，并使用词法与语义权重均为 `1` 的 equal-RRF。未配置模型或语义索引异常时，系统会降级到 FTS5 Fast Path。
 
+## 自动记忆整合（可选）
+
+默认关闭。设置 `TAGA_CONSOLIDATION_MODE=on` 后，daemon 的后台 `consolidation.scan` 任务会：
+
+1. **语义去重**：对新 draft 计算与 active 记忆的 BGE-M3 余弦相似度。`≥ TAGA_DEDUP_REJECT_SIMILARITY`（默认 0.95）判定为重复、`≥ TAGA_DEDUP_MERGE_SIMILARITY`（默认 0.88）判定为重叠——两者都会生成 garden proposal 并通知，不进入自动晋升；相似度更低则视为新颖。
+2. **反馈自动晋升**：draft 累计 `usefulCount ≥ TAGA_AUTO_PROMOTE_USEFUL_COUNT`（默认 2）且未被去重拦截时，按 `proactive.autoActivateFeedback` 策略自动转为 active，审计事件以 `actor: daemon` 落账并发送 L1 通知。`notUsefulCount ≥ TAGA_AUTO_PROMOTE_MAX_NOT_USEFUL`（默认 2）的 draft 不再自动晋升。
+3. **LLM merge 裁决（可选插槽）**：配置 `TAGA_LLM_MODE=on` 与 OpenAI 兼容端点后，重叠区间（0.88–0.95）的 draft 交由 LLM 做 merge-or-keep 裁决；判定 merge 时生成合并文本供 garden review 采纳，不自动改写 active 记忆。未配置 LLM 时重叠 draft 直接进入人工 review。语义索引不可用时去重降级跳过，晋升不受影响。
+
+相关环境变量：
+
+```bash
+TAGA_CONSOLIDATION_MODE=off            # on 开启后台整合
+TAGA_AUTO_PROMOTE_USEFUL_COUNT=2      # 自动晋升所需 useful 反馈数
+TAGA_AUTO_PROMOTE_MAX_NOT_USEFUL=2    # 超过则不再自动晋升
+TAGA_DEDUP_REJECT_SIMILARITY=0.95     # 重复判定阈值
+TAGA_DEDUP_MERGE_SIMILARITY=0.88      # 重叠判定下限
+TAGA_CONSOLIDATION_SCAN_INTERVAL_MS=600000
+TAGA_LLM_MODE=off                     # on 启用 LLM merge 裁决
+TAGA_LLM_ENDPOINT=                    # OpenAI 兼容端点（如本地 Ollama）
+TAGA_LLM_API_KEY=
+TAGA_LLM_MODEL=
+TAGA_LLM_TIMEOUT_MS=3000
+```
+
+### Draft 软召回
+
+MCP `memory_search` 支持显式 `include_draft: true`（CLI 为 `memory search --include-draft`），draft 结果以 `status:draft:unverified` 标记并降权 0.5。默认召回与静态 Context Pack 仍仅包含 active 记忆。搜索结果的 `proof` 字段与 `proof:useful:N` / `proof:verified` match-reason 标记展示每条记忆的反馈佐证，供调用方自行加权。
+
 ## 可选 Reranker
 
 Taga 支持 Transformers.js 可加载的 `bge-reranker-v2-m3` ONNX 模型：
@@ -238,6 +268,6 @@ node scripts/evaluate-semantic.mjs --suite=strict-300 --rerank-top-k=10
 ## 安全原则
 
 - 敏感值不得写入 Markdown、SQLite payload、日志、MCP 错误或测试 fixture。
-- 未确认的 candidate/draft 不进入默认召回和静态 Context Pack。
-- 高风险行为不得在没有单独授权的情况下自动执行。
-- 所有写入、生命周期变化、召回、注入、反馈和遗忘操作都应可审计。
+- 未确认的 candidate/draft 不进入默认召回和静态 Context Pack；显式 `include_draft` 的搜索结果带未验证标记并降权。
+- 高风险行为不得在没有单独授权的情况下自动执行；自动晋升仅限 draft → active，遗忘与改写 active 记忆始终需要人工确认。
+- 所有写入、生命周期变化、召回、注入、反馈和遗忘操作都应可审计；自动转正以 `actor: daemon` 落审计并可人工回滚。

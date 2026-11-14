@@ -8,6 +8,7 @@ import type { AuditLog, LifecycleActor } from './governance.js';
 
 export type ProactiveLevel = 'L0' | 'L1' | 'L2' | 'L3';
 export type ProactiveAction = 'collect' | 'distill' | 'notify' | 'remind' | 'activate' | 'external';
+export type DedupVerdict = 'novel' | 'keep' | 'merge' | 'duplicate' | 'skipped';
 
 export interface ProactivePolicy {
   readonly enabled: boolean;
@@ -17,6 +18,8 @@ export interface ProactivePolicy {
   readonly allowL1Notifications: boolean;
   readonly allowL2Reminders: boolean;
   readonly autoActivateLessons: boolean;
+  readonly autoActivateFeedback: boolean;
+  readonly autoActivateMinUsefulCount: number;
   readonly quietHours?: { readonly start: string; readonly end: string };
   readonly dailyNotificationLimit: number;
 }
@@ -29,6 +32,8 @@ export interface ProactiveEvent {
   readonly memoryType?: MemoryType;
   readonly confidence?: number;
   readonly evidenceGatePassed?: boolean;
+  readonly usefulCount?: number;
+  readonly dedupVerdict?: DedupVerdict;
   readonly explicitApproval?: boolean;
   readonly timedOut?: boolean;
   readonly currentNotificationCount?: number;
@@ -52,6 +57,8 @@ export const DEFAULT_PROACTIVE_POLICY: ProactivePolicy = {
   allowL1Notifications: true,
   allowL2Reminders: false,
   autoActivateLessons: false,
+  autoActivateFeedback: false,
+  autoActivateMinUsefulCount: 2,
   dailyNotificationLimit: 20,
 };
 
@@ -71,6 +78,8 @@ export function proactivePolicyFrom(input?: Policy | Partial<ProactivePolicy>): 
     allowL1Notifications: values.allowL1Notifications ?? DEFAULT_PROACTIVE_POLICY.allowL1Notifications,
     allowL2Reminders: values.allowL2Reminders ?? DEFAULT_PROACTIVE_POLICY.allowL2Reminders,
     autoActivateLessons: values.autoActivateLessons ?? DEFAULT_PROACTIVE_POLICY.autoActivateLessons,
+    autoActivateFeedback: values.autoActivateFeedback ?? DEFAULT_PROACTIVE_POLICY.autoActivateFeedback,
+    autoActivateMinUsefulCount: values.autoActivateMinUsefulCount ?? DEFAULT_PROACTIVE_POLICY.autoActivateMinUsefulCount,
     dailyNotificationLimit: values.dailyNotificationLimit ?? DEFAULT_PROACTIVE_POLICY.dailyNotificationLimit,
   };
   return values.quietHours === undefined ? base : { ...base, quietHours: values.quietHours };
@@ -111,10 +120,22 @@ export function evaluateProactivePolicy(
     return { level: 'L2', allowed, outcome: allowed ? 'allowed' : 'denied', reason: !policy.allowL2Reminders ? 'l2-reminders-disabled' : quiet ? 'quiet-hours' : !withinLimit ? 'daily-notification-limit' : 'reminder-allowed', ...common };
   }
   if (event.action === 'activate') {
-    const protectedType = event.memoryType !== 'lessons';
-    const eligible = event.memoryType === 'lessons' && event.confidence !== undefined && event.confidence >= 0.9 && event.evidenceGatePassed === true;
-    const allowed = !protectedType && policy.autoActivateLessons && eligible;
-    return { level: 'L2', allowed, outcome: allowed ? 'allowed' : 'review_required', reason: protectedType ? 'memory-type-requires-review' : !policy.autoActivateLessons ? 'lesson-auto-activation-disabled' : !eligible ? 'lesson-evidence-gate-failed' : 'lesson-auto-activation-allowed', ...common };
+    const lessonsEligible = event.memoryType === 'lessons' && event.confidence !== undefined && event.confidence >= 0.9 && event.evidenceGatePassed === true;
+    const dedupClean = event.dedupVerdict === undefined || event.dedupVerdict === 'novel' || event.dedupVerdict === 'keep' || event.dedupVerdict === 'skipped';
+    const feedbackEligible = dedupClean && event.usefulCount !== undefined && event.usefulCount >= policy.autoActivateMinUsefulCount;
+    const lessonsAllowed = policy.autoActivateLessons && lessonsEligible;
+    const feedbackAllowed = policy.autoActivateFeedback && feedbackEligible;
+    const allowed = lessonsAllowed || feedbackAllowed;
+    const reason = allowed
+      ? lessonsAllowed ? 'lesson-auto-activation-allowed' : 'feedback-auto-activation-allowed'
+      : !dedupClean
+        ? 'dedup-flagged-requires-review'
+        : !lessonsEligible && !feedbackEligible
+          ? 'activation-eligibility-not-met'
+          : lessonsEligible
+            ? 'lesson-auto-activation-disabled'
+            : 'feedback-auto-activation-disabled';
+    return { level: 'L2', allowed, outcome: allowed ? 'allowed' : 'review_required', reason, ...common };
   }
   const allowed = event.explicitApproval === true;
   return { level: 'L3', allowed, outcome: allowed ? 'allowed' : 'review_required', reason: allowed ? 'explicit-approval' : 'explicit-approval-required', ...common };

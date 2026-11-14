@@ -252,6 +252,8 @@ export const policySchema = z.object({
     allowL1Notifications: z.boolean(),
     allowL2Reminders: z.boolean(),
     autoActivateLessons: z.boolean(),
+    autoActivateFeedback: z.boolean().optional(),
+    autoActivateMinUsefulCount: z.number().int().nonnegative().optional(),
     quietHours: z
       .object({ start: z.string().regex(/^\d{2}:\d{2}$/), end: z.string().regex(/^\d{2}:\d{2}$/) })
       .optional(),

@@ -10,6 +10,7 @@ import { NotificationService } from '../../../packages/notifications/src/index.j
 import { MarkdownMemoryRepository } from '../../../packages/storage/src/index.js';
 import { DatabaseStore, type JobRecord } from '../../../packages/storage/src/index.js';
 import { semanticJobHandlers } from './semantic.js';
+import { consolidationJobHandlers } from './consolidation.js';
 import {
   DaemonLease,
   stopRequested,
@@ -174,6 +175,7 @@ export function defaultJobHandlers(brainPath: string, database: DatabaseStore): 
   const notifications = new NotificationService(database, audit);
   return new Map<string, DaemonJobHandler>([
     ...semanticJobHandlers(brainPath, database),
+    ...consolidationJobHandlers(brainPath, database, { notifications }),
     ['reindex', async () => {
       await new RecoveryService(brainPath, database).reindex();
     }],

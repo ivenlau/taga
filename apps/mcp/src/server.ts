@@ -6,6 +6,7 @@ import {
   DEFAULT_PROACTIVE_POLICY,
   GovernanceService,
   SqliteAuditLog,
+  enqueueConsolidationScan,
 } from '../../../packages/application/src/index.js';
 import {
   contentHash,
@@ -414,6 +415,7 @@ export class LiteMcpServer {
       const searchInput = {
         query: parsed.query,
         ...(parsed.project_id === undefined ? {} : { scope: { kind: 'project' as const, id: parsed.project_id } }),
+        ...(parsed.include_draft === true ? { includeDraft: true } : {}),
         limit: mode === 'off' ? parsed.k ?? 5 : Math.max(parsed.k ?? 5, rerankMode === 'off' ? parsed.k ?? 5 : rerankTopK),
       };
       const semantic = mode === 'off' ? undefined : this.semanticRetriever(database);
@@ -453,6 +455,11 @@ export class LiteMcpServer {
         summary: item.memory.summary,
         score: item.score,
         match_reason: item.matchReason,
+        proof: {
+          useful_count: item.memory.usefulCount ?? 0,
+          not_useful_count: item.memory.notUsefulCount ?? 0,
+          ...(item.memory.lastVerified === undefined || item.memory.lastVerified === null ? {} : { verified_at: item.memory.lastVerified }),
+        },
         freshness: freshnessFor(item.memory.updatedAt, this.clock()),
         suggested_action: 'memory_timeline',
         detail_id: item.memory.id,
@@ -829,6 +836,7 @@ export class LiteMcpServer {
         .create(memory, { actor: parsed.actor }, 'memory_record via MCP');
       new FtsRetrievalProvider(database).upsert(saved, parsed.body);
       enqueueSemanticUpsert(database, saved.id, saved.contentHash);
+      enqueueConsolidationScan(database);
       return {
         ok: true,
         data: { candidate_id: saved.id, status: saved.status, review_command: `taga review --memory=${saved.id}` },
@@ -858,6 +866,7 @@ export class LiteMcpServer {
         new FtsRetrievalProvider(database).upsert(updated, body);
       }
       enqueueSemanticUpsert(database, updated.id, updated.contentHash);
+      enqueueConsolidationScan(database);
       return { ok: true, data: { memory_id: updated.id, kind: parsed.kind, useful_count: updated.usefulCount, not_useful_count: updated.notUsefulCount }, degraded: false, warnings: [], next_actions: [] };
     } finally {
       database.close();

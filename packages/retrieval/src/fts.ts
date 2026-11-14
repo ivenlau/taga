@@ -8,7 +8,10 @@ export interface SearchInput {
   readonly scope?: Scope;
   readonly limit?: number;
   readonly now?: string;
+  readonly includeDraft?: boolean;
 }
+
+export const DRAFT_RECALL_PENALTY = 0.5;
 
 export interface RecallCandidate {
   readonly memory: MemoryIndexEntry;
@@ -53,6 +56,7 @@ export interface HybridRetrievalOptions {
   readonly reranker?: Reranker;
   readonly rerankTopK?: number;
   readonly rerankTimeoutMs?: number;
+  readonly includeDraft?: boolean;
 }
 
 export interface ProgressiveIndexRow {
@@ -189,8 +193,8 @@ export class FtsRetrievalProvider {
     }
     try {
       const semanticResults = await semantic.search(input);
-      const filtered = semanticResults.filter((item) => isRecallable(item.memory, input.scope));
-      const fused = fuseRankedResults(lexical, filtered, options);
+      const filtered = semanticResults.filter((item) => isRecallable(item.memory, input.scope, input));
+      const fused = fuseRankedResults(lexical, filtered, { ...options, includeDraft: options.includeDraft ?? input.includeDraft === true });
       if (options.reranker === undefined) {
         return {
           items: fused.slice(0, input.limit ?? 10),
@@ -269,7 +273,7 @@ export class FtsRetrievalProvider {
         name,
         weight,
         results: matches
-          .filter(({ entry }) => isRecallable(entry, input.scope))
+          .filter(({ entry }) => isRecallable(entry, input.scope, input))
           .map(({ entry }, index) => ({ memory: entry, rank: index + 1 })),
       };
     } catch {
@@ -297,11 +301,12 @@ export class ProgressiveRecallService {
     return this.provider.timeline(memoryId).slice(0, Math.max(0, limit));
   }
 
-  details(memoryIds: readonly string[], maxBodyCharacters = 8_000): ProgressiveDetail[] {
+  details(memoryIds: readonly string[], maxBodyCharacters = 8_000, options?: { readonly includeDraft?: boolean }): ProgressiveDetail[] {
     const limit = Math.max(0, maxBodyCharacters);
     return memoryIds.flatMap((memoryId) => {
       const memory = this.provider.get(memoryId);
-      if (memory === null || memory.status !== 'active' || memory.visibility === 'excluded') return [];
+      if (memory === null || memory.visibility === 'excluded') return [];
+      if (memory.status !== 'active' && !(options?.includeDraft === true && memory.status === 'draft')) return [];
       const body = memory.body;
       return [{
         id: memory.id,
@@ -460,13 +465,23 @@ function fuseLexicalBranches(branches: readonly LexicalBranch[], input: SearchIn
       const scope = scopeForEntry(item.memory);
       const temporal = timeBoost(item.memory.updatedAt, plan.timeRange);
       const type = plan.memoryTypeHint === undefined || item.memory.type === plan.memoryTypeHint ? 1.12 : 0.94;
-      const score = item.relevance * scopeWeight(scope) * item.memory.confidence * sourceTrustWeight(item.memory.sourceTrust) * temporal * type;
-      const reasons = [...item.reasons, `scope:${scope.kind}`, 'status:active', 'rank:rrf'];
+      const draftRecall = item.memory.status === 'draft';
+      const draftPenalty = draftRecall ? DRAFT_RECALL_PENALTY : 1;
+      const score = item.relevance * scopeWeight(scope) * item.memory.confidence * sourceTrustWeight(item.memory.sourceTrust) * temporal * type * draftPenalty;
+      const reasons = [...item.reasons, `scope:${scope.kind}`, draftRecall ? 'status:draft:unverified' : `status:${item.memory.status}`, 'rank:rrf'];
+      reasons.push(...proofReasons(item.memory));
       if (plan.memoryTypeHint !== undefined) reasons.push(`type:${item.memory.type === plan.memoryTypeHint ? 'match' : 'mismatch'}`);
       if (plan.timeRange !== undefined) reasons.push(`time:${temporal > 1 ? 'match' : 'outside'}`);
       return { memory: item.memory, score, matchReason: reasons, source: 'fts5' as const };
     })
     .sort((left, right) => right.score - left.score || left.memory.id.localeCompare(right.memory.id));
+}
+
+function proofReasons(entry: MemoryIndexEntry): readonly string[] {
+  const reasons: string[] = [];
+  if ((entry.usefulCount ?? 0) > 0) reasons.push(`proof:useful:${entry.usefulCount}`);
+  if (entry.lastVerified !== undefined && entry.lastVerified !== null) reasons.push('proof:verified');
+  return reasons;
 }
 
 function timeBoost(updatedAt: string, range: LexicalPlan['timeRange']): number {
@@ -499,6 +514,9 @@ function toIndexEntry(memory: Memory, body: string): MemoryIndexEntry {
     sourceTrust: memory.sourceTrust,
     contentHash: memory.contentHash,
     updatedAt: memory.updated,
+    usefulCount: memory.usefulCount,
+    notUsefulCount: memory.notUsefulCount,
+    ...(memory.lastVerified === undefined || memory.lastVerified === null ? {} : { lastVerified: memory.lastVerified }),
   };
 }
 
@@ -531,8 +549,14 @@ function scopeForEntry(entry: MemoryIndexEntry): Scope {
   return { kind: 'global' };
 }
 
-function isRecallable(entry: MemoryIndexEntry, target?: Scope): boolean {
-  if (entry.status !== 'active' || entry.visibility === 'excluded') return false;
+function isRecallable(entry: MemoryIndexEntry, target?: Scope, options?: { readonly includeDraft?: boolean }): boolean {
+  if (entry.visibility === 'excluded') return false;
+  if (entry.status === 'active') return scopeMatches(entry, target);
+  if (options?.includeDraft === true && entry.status === 'draft') return scopeMatches(entry, target);
+  return false;
+}
+
+function scopeMatches(entry: MemoryIndexEntry, target?: Scope): boolean {
   if (target === undefined || entry.scopeKind === 'global') return true;
   if (target.kind === 'project') return entry.scopeKind === 'project' && entry.scopeId === target.id || entry.scopeKind === 'domain';
   if (target.kind === 'domain') return entry.scopeKind === 'domain' && entry.scopeId === target.id;
@@ -551,7 +575,7 @@ function sourceTrustWeight(sourceTrust: string): number {
 function fuseRankedResults(
   lexical: readonly { readonly memory: MemoryIndexEntry; readonly score: number; readonly matchReason: readonly string[] }[],
   semantic: readonly SemanticCandidate[],
-  options: { readonly lexicalWeight?: number; readonly semanticWeight?: number },
+  options: { readonly lexicalWeight?: number; readonly semanticWeight?: number; readonly includeDraft?: boolean },
 ): HybridRecallCandidate[] {
   const lexicalWeight = options.lexicalWeight ?? 1;
   const semanticWeight = options.semanticWeight ?? 1;
@@ -588,15 +612,19 @@ function fuseRankedResults(
   });
   return [...byId.values()]
     .map((item) => {
-      const relevance = lexicalWeight * (item.lexicalRank === undefined ? 0 : 1 / (60 + item.lexicalRank))
-        + semanticWeight * (item.semanticRank === undefined ? 0 : 1 / (60 + item.semanticRank));
+      const draftRecall = options.includeDraft === true && item.memory.status === 'draft';
+      const draftPenalty = draftRecall ? DRAFT_RECALL_PENALTY : 1;
+      const relevance = (lexicalWeight * (item.lexicalRank === undefined ? 0 : 1 / (60 + item.lexicalRank))
+        + semanticWeight * (item.semanticRank === undefined ? 0 : 1 / (60 + item.semanticRank))) * draftPenalty;
+      const reasons = draftRecall && item.lexicalRank === undefined ? [...item.reasons, 'status:draft:unverified'] : item.reasons;
+      reasons.push(...proofReasons(item.memory));
       return {
         memory: item.memory,
         score: relevance,
         relevance,
         ...(item.lexicalScore === undefined ? {} : { lexicalScore: item.lexicalScore }),
         ...(item.semanticScore === undefined ? {} : { semanticScore: item.semanticScore }),
-        matchReason: [...new Set(item.reasons)],
+        matchReason: [...new Set(reasons)],
         source: item.lexicalRank === undefined ? 'hybrid' as const : item.semanticRank === undefined ? 'fts5' as const : 'hybrid' as const,
       };
     })

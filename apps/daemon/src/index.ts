@@ -3,7 +3,11 @@ import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { AgentAdapterRegistry } from '../../../packages/adapters/src/index.js';
 import { DatabaseStore } from '../../../packages/storage/src/index.js';
-import { SqliteAuditLog } from '../../../packages/application/src/index.js';
+import {
+  SqliteAuditLog,
+  consolidationConfigFromEnv,
+  enqueueScheduledConsolidationScan,
+} from '../../../packages/application/src/index.js';
 import { AgentIngestionService, AutomaticSourceRuntime } from './ingestion.js';
 import { AgentAcceptanceService } from './acceptance.js';
 import {
@@ -32,12 +36,21 @@ export async function createDefaultDaemonRuntime(brainPath: string): Promise<Dae
       ...defaultJobHandlers(brainPath, database),
       ['source.ingest', async (job) => { await sourceRuntime.handle(job); }],
     ]),
-    watchers: configuredAgents.length === 0 ? [] : [{
-      id: 'agent-sources',
-      async run(): Promise<void> {
-        await ingestion.runOnce(configuredAgents);
+    watchers: [
+      ...(configuredAgents.length === 0 ? [] : [{
+        id: 'agent-sources',
+        async run(): Promise<void> {
+          await ingestion.runOnce(configuredAgents);
+        },
+      }]),
+      {
+        id: 'consolidation-scheduler',
+        run(): Promise<void> {
+          enqueueScheduledConsolidationScan(database, consolidationConfigFromEnv(), new Date());
+          return Promise.resolve();
+        },
       },
-    }],
+    ],
   };
   return new DaemonRuntime(options);
 }

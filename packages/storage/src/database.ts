@@ -60,6 +60,9 @@ export interface MemoryIndexEntry {
   readonly sourceTrust: string;
   readonly contentHash: string;
   readonly updatedAt: string;
+  readonly usefulCount?: number;
+  readonly notUsefulCount?: number;
+  readonly lastVerified?: string;
 }
 
 export interface IntegrityReport {
