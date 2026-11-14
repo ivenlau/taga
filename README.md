@@ -83,6 +83,14 @@ node dist/apps/cli/src/main.js doctor --brain=./brain --json
 node dist/apps/cli/src/main.js reindex --brain=./brain
 ```
 
+接入真实 Agent（注册会话采集适配器，并把记忆使用指令写入项目的 `CLAUDE.md` / `AGENTS.md` 以及对应的全局指令文件）：
+
+```bash
+node dist/apps/cli/src/main.js init --agent=claude-code,codex --yes
+```
+
+指令块由 `taga:instructions:begin/end` 标记管理，重复 init 幂等；`--no-instructions` 可跳过注入。注册适配器后，daemon 会自动采集 agent 会话日志并蒸馏 candidate 进审核队列。
+
 常用命令：
 
 ```bash

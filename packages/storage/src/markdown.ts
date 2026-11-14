@@ -6,6 +6,19 @@ import { errorCodes, type MemoryType, type Scope, TagaError } from '../../domain
 
 export const markerBegin = '<!-- taga:begin v1 do-not-edit -->';
 export const markerEnd = '<!-- taga:end -->';
+export const instructionBlockBegin = '<!-- taga:instructions:begin v1 do-not-edit -->';
+export const instructionBlockEnd = '<!-- taga:instructions:end -->';
+
+export interface ManagedBlockMarkers {
+  readonly begin: string;
+  readonly end: string;
+}
+
+const defaultMarkers: ManagedBlockMarkers = { begin: markerBegin, end: markerEnd };
+
+function allKnownMarkers(): readonly string[] {
+  return [markerBegin, markerEnd, instructionBlockBegin, instructionBlockEnd];
+}
 
 export interface ParsedMarkdownDocument {
   readonly frontmatter: Record<string, unknown>;
@@ -54,9 +67,9 @@ export function serializeMarkdownDocument(
   return `---\n${stringifyYaml(frontmatter)}---\n${body}`;
 }
 
-export function parseManagedBlock(content: string): ManagedBlock {
-  const beginOffsets = allOffsets(content, markerBegin);
-  const endOffsets = allOffsets(content, markerEnd);
+export function parseManagedBlock(content: string, markers: ManagedBlockMarkers = defaultMarkers): ManagedBlock {
+  const beginOffsets = allOffsets(content, markers.begin);
+  const endOffsets = allOffsets(content, markers.end);
   if (beginOffsets.length !== 1 || endOffsets.length !== 1) {
     throw new TagaError(errorCodes.conflict, 'managed marker count is invalid');
   }
@@ -65,20 +78,22 @@ export function parseManagedBlock(content: string): ManagedBlock {
   if (start === undefined || end === undefined || end <= start) {
     throw new TagaError(errorCodes.conflict, 'managed marker order is invalid');
   }
-  const managedContentStart = start + markerBegin.length;
+  const managedContentStart = start + markers.begin.length;
   return {
     start,
-    end: end + markerEnd.length,
+    end: end + markers.end.length,
     content: content.slice(managedContentStart, end),
   };
 }
 
-export function replaceManagedBlock(content: string, generated: string): string {
-  const block = parseManagedBlock(content);
-  if (generated.includes(markerBegin) || generated.includes(markerEnd)) {
-    throw new TagaError(errorCodes.validationFailed, 'generated content contains managed markers');
+export function replaceManagedBlock(content: string, generated: string, markers: ManagedBlockMarkers = defaultMarkers): string {
+  const block = parseManagedBlock(content, markers);
+  for (const marker of allKnownMarkers()) {
+    if (generated.includes(marker)) {
+      throw new TagaError(errorCodes.validationFailed, 'generated content contains managed markers');
+    }
   }
-  const replacement = `${markerBegin}\n${generated}\n${markerEnd}`;
+  const replacement = `${markers.begin}\n${generated}\n${markers.end}`;
   return `${content.slice(0, block.start)}${replacement}${content.slice(block.end)}`;
 }
 
@@ -90,14 +105,37 @@ export async function writeManagedBlock(
   path: string,
   generated: string,
   expectedHash?: string,
+  markers: ManagedBlockMarkers = defaultMarkers,
 ): Promise<string> {
   const before = await readFile(path, 'utf8');
   if (expectedHash !== undefined && contentHash(before) !== expectedHash) {
     throw new TagaError(errorCodes.conflict, 'markdown file changed externally');
   }
-  const updated = replaceManagedBlock(before, generated);
+  const updated = replaceManagedBlock(before, generated, markers);
   await atomicWrite(path, updated);
   return contentHash(updated);
+}
+
+export async function upsertManagedBlock(
+  path: string,
+  generated: string,
+  markers: ManagedBlockMarkers,
+): Promise<void> {
+  let current = '';
+  try {
+    current = await readFile(path, 'utf8');
+  } catch (error) {
+    if (!isMissingFile(error)) throw error;
+  }
+  for (const marker of allKnownMarkers()) {
+    if (generated.includes(marker)) {
+      throw new TagaError(errorCodes.validationFailed, 'generated content contains managed markers');
+    }
+  }
+  const updated = current.includes(markers.begin) && current.includes(markers.end)
+    ? replaceManagedBlock(current, generated, markers)
+    : `${current}${current.length === 0 ? '' : '\n'}${markers.begin}\n${generated}\n${markers.end}\n`;
+  await atomicWrite(path, updated);
 }
 
 export async function writeMarkdownDocument(

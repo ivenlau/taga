@@ -28,7 +28,7 @@ import {
   platformPaths,
   SystemdUserServiceManager,
 } from '../../../packages/platform/src/index.js';
-import { AgentAdapterRegistry } from '../../../packages/adapters/src/index.js';
+import { AgentAdapterRegistry, DEFAULT_AGENT_INSTRUCTIONS } from '../../../packages/adapters/src/index.js';
 import {
   AgentAcceptanceService,
   AgentIngestionService,
@@ -66,10 +66,13 @@ import {
   DatabaseStore,
   MarkdownMemoryRepository,
   contentHash,
+  instructionBlockBegin,
+  instructionBlockEnd,
   markerBegin,
   markerEnd,
   parseManagedBlock,
   parseMarkdownDocument,
+  upsertManagedBlock,
 } from '../../../packages/storage/src/index.js';
 import { SessionContextService } from '../../../packages/session/src/index.js';
 
@@ -258,6 +261,7 @@ async function initCommand(context: CliContext): Promise<CliResponse> {
     agents,
     remoteModelAllowed: false,
   };
+  const writeInstructions = context.options.get('no-instructions') !== true;
   const preview = {
     brainPath: context.brainPath,
     configPath: context.configPath,
@@ -267,7 +271,10 @@ async function initCommand(context: CliContext): Promise<CliResponse> {
     collectionScope: ['global', `project:${projectId}`],
     network: 'disabled',
     agents: agents.map((agent) => ({ id: agent.id, targetPath: agent.targetPath, targetPaths: agent.targetPaths })),
-    changes: [...new Set([context.configPath, ...agents.flatMap((agent) => [agent.configPath, agent.targetPath])])],
+    changes: [...new Set([
+      context.configPath,
+      ...agents.flatMap((agent) => [agent.configPath, ...(writeInstructions ? agent.targetPaths : [agent.targetPath])]),
+    ])],
   };
   if (!isConfirmed(context.options)) {
     throw new CliFailure(
@@ -283,6 +290,11 @@ async function initCommand(context: CliContext): Promise<CliResponse> {
   for (const agent of agents) {
     await writeYaml(agent.configPath, { schemaVersion: 1, agentId: agent.id, projectId, targetPaths: agent.targetPaths });
     await ensureMarkerFile(agent.targetPath);
+    if (writeInstructions) {
+      for (const target of agent.targetPaths) {
+        await upsertManagedBlock(target, DEFAULT_AGENT_INSTRUCTIONS, { begin: instructionBlockBegin, end: instructionBlockEnd });
+      }
+    }
   }
   await mkdir(join(context.brainPath, 'global'), { recursive: true });
   const database = new DatabaseStore(context.databasePath);

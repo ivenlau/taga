@@ -4,12 +4,15 @@ export {
   BrainLayout,
   atomicWrite,
   contentHash,
+  instructionBlockBegin,
+  instructionBlockEnd,
   markerBegin,
   markerEnd,
   parseManagedBlock,
   parseMarkdownDocument,
   replaceManagedBlock,
   serializeMarkdownDocument,
+  upsertManagedBlock,
   writeManagedBlock,
   writeMarkdownDocument,
 } from './markdown.js';
@@ -28,5 +31,5 @@ export type {
   SessionObservationInput,
 } from './database.js';
 export type { StoredMemory } from './memory-repository.js';
-export type { ManagedBlock, ParsedMarkdownDocument } from './markdown.js';
+export type { ManagedBlock, ManagedBlockMarkers, ParsedMarkdownDocument } from './markdown.js';
 export type { Migration } from './migrations.js';

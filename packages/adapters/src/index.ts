@@ -9,6 +9,23 @@ import Database from 'better-sqlite3';
 
 const execFileAsync = promisify(execFile);
 
+export const DEFAULT_AGENT_INSTRUCTIONS = [
+  '## Taga 长期记忆（taga-mcp）',
+  '',
+  '本会话接入了 Taga 本地记忆库（MCP 服务器 `taga`，工具以 `memory_` / `brain_` / `context_` 开头）。行为约定：',
+  '',
+  '1. **会话开始**：进入一个新任务会话时，调用 `memory_session_start`（`session_id` 用 `日期-项目简称` 格式，如 `20261114-taga`）拉取相关记忆作为上下文；返回的 Context Pack 中的记忆视为背景参考。',
+  '2. **主动记录**：当会话中产生或确认了**可跨会话复用**的经验时，主动调用 `memory_record` 写入。典型场景：',
+  '   - 踩坑与修复方案（报错根因、有效解法）',
+  '   - 用户的偏好与工作习惯（称呼、代码风格、流程偏好）',
+  '   - 项目关键决策与环境配置变更（端口、路径、版本约束）',
+  '   - 验证过的操作步骤（部署、构建、排查流程）',
+  '   参数要求：`requested_status` 必须显式传 `"draft"`（不要用默认值 candidate），`actor` 传 `"agent"`，`sources` 至少给出一条来源（file/commit/tool_call）。宁缺毋滥——只记可复用的事实，不记一次性细节和中间过程。',
+  '3. **动手前查询**：遇到"以前怎么解决的"类问题、或要修改之前改过的文件时，先 `memory_search` 再动手，避免重复踩坑。',
+  '4. **反馈闭环**：召回的记忆确实帮到了你，可在会话收尾时对关键记忆调 `memory_feedback`（kind=useful）；发现记忆过时或有误，调 kind=conflict 或 not_useful。',
+  '5. **状态说明**：写入的记忆是 draft，由用户审核或后台整合（consolidation）自动晋升后才进默认召回。不要向用户声称记忆"已生效"，可以说"已记录待审核"。',
+].join('\n');
+
 export interface SourceCursor {
   readonly offset: number;
   readonly sourceVersion: string;
@@ -411,7 +428,8 @@ export class ClaudeCodeAgentAdapter extends BaseJsonlAgentAdapter {
   }
 
   private configRoot(): string {
-    return this.options.env?.CLAUDE_CONFIG_DIR ?? this.options.env?.CLAUDE_HOME ?? join(this.options.homeDir ?? homedir(), '.claude');
+    const env = this.options.env ?? process.env;
+    return env.CLAUDE_CONFIG_DIR ?? env.CLAUDE_HOME ?? join(this.options.homeDir ?? homedir(), '.claude');
   }
 }
 
@@ -445,7 +463,8 @@ export class CodexAgentAdapter extends BaseJsonlAgentAdapter {
   }
 
   private configRoot(): string {
-    return this.options.env?.CODEX_HOME ?? join(this.options.homeDir ?? homedir(), '.codex');
+    const env = this.options.env ?? process.env;
+    return env.CODEX_HOME ?? join(this.options.homeDir ?? homedir(), '.codex');
   }
 }
 
