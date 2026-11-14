@@ -1,0 +1,15 @@
+{
+  "name": "@taga/session",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "dependencies": {
+    "@taga/context": "workspace:*",
+    "@taga/domain": "workspace:*",
+    "@taga/retrieval": "workspace:*",
+    "@taga/storage": "workspace:*"
+  }
+}

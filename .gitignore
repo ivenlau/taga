@@ -1,0 +1,15 @@
+﻿
+# >>> minispec 鈥?dev-local scaffolding (added by `minispec init`) >>>
+# Remove this block to commit minispec files and track change history in
+# git alongside your code. See README for details.
+AGENTS.md
+CLAUDE.md
+.agents/
+.claude/
+minispec/
+node_modules/
+dist/
+coverage/
+.tmp-*/
+pnpm-debug.log*
+# <<< minispec <<<

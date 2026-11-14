@@ -1,0 +1,20 @@
+{
+  "name": "@taga/daemon",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "taga-daemon": "../../dist/apps/daemon/src/main.js"
+  },
+  "dependencies": {
+    "@taga/adapters": "workspace:*",
+    "@taga/observability": "workspace:*",
+    "@taga/platform": "workspace:*",
+    "@taga/recovery": "workspace:*",
+    "@taga/redaction": "workspace:*",
+    "@taga/storage": "workspace:*",
+    "@taga/embedding": "workspace:*",
+    "@taga/semantic-index": "workspace:*",
+    "yaml": "^2.9.1"
+  }
+}

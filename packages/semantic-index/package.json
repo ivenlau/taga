@@ -1,0 +1,16 @@
+{
+  "name": "@taga/semantic-index",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "dependencies": {
+    "@taga/zvec": "workspace:*",
+    "@taga/embedding": "workspace:*",
+    "@taga/retrieval": "workspace:*",
+    "@taga/storage": "workspace:*",
+    "@zvec/zvec": "0.8.0"
+  }
+}

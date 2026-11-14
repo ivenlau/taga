@@ -1,0 +1,12 @@
+{
+  "name": "@taga/zvec",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "dependencies": {
+    "@zvec/zvec": "0.8.0"
+  }
+}

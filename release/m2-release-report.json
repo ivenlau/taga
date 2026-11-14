@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "milestone": "M2",
+  "generatedAt": "2026-11-11T08:44:35.843Z",
+  "status": "passed",
+  "releaseCode": "M2_RELEASE_READY",
+  "blockers": [],
+  "agents": [
+    { "id": "pi", "parserVersion": "pi-session-v3", "realSession": true, "reviewed": true, "recalled": true },
+    { "id": "claude-code", "parserVersion": "claude-session-v1", "realSession": true, "reviewed": true, "recalled": true },
+    { "id": "codex", "parserVersion": "codex-rollout-v1", "realSession": true, "reviewed": true, "recalled": true },
+    { "id": "opencode", "parserVersion": "opencode-sqlite-v1", "realSession": true, "reviewed": true, "recalled": true }
+  ],
+  "platforms": [
+    { "id": "windows", "node": "24", "build": "passed", "lint": "passed", "testFiles": 22, "tests": 60 },
+    { "id": "ubuntu-24.04-wsl2", "node": "24.11.1", "build": "passed", "lint": "passed", "testFiles": 22, "tests": 60 }
+  ],
+  "systemd": {
+    "userService": true,
+    "install": "passed",
+    "start": "passed",
+    "status": "passed",
+    "restart": "passed",
+    "stop": "passed",
+    "uninstall": "passed",
+    "brainPreserved": true
+  },
+  "knowledge": {
+    "memoryPartitions": 5,
+    "procedureReuse": "recall-useful-verified",
+    "gardenCategories": ["duplicate", "stale", "conflict"],
+    "digestStatsLedger": "passed"
+  },
+  "performance": {
+    "fixtureMemories": 10000,
+    "rebuildBudgetMs": 5000,
+    "searchP95BudgetMs": 250,
+    "status": "passed"
+  },
+  "security": {
+    "secretLeakageGate": "passed",
+    "privateEvidenceBodiesExported": false
+  },
+  "excludedAgents": ["gemini"]
+}

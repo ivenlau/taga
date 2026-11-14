@@ -1,0 +1,9 @@
+{
+  "name": "@taga/mcp",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "taga-mcp": "../../dist/apps/mcp/src/main.js"
+  }
+}

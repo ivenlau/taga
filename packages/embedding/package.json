@@ -1,0 +1,12 @@
+{
+  "name": "@taga/embedding",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "4.3.2"
+  }
+}

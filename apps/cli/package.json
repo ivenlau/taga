@@ -1,0 +1,15 @@
+{
+  "name": "@taga/cli",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": {
+    "@taga/metrics": "workspace:*",
+    "@taga/platform": "workspace:*",
+    "@taga/release": "workspace:*",
+    "@taga/zvec": "workspace:*"
+  },
+  "bin": {
+    "taga": "../../dist/apps/cli/src/main.js"
+  }
+}

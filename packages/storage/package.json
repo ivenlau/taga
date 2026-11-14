@@ -1,0 +1,13 @@
+{
+  "name": "@taga/storage",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "dependencies": {
+    "@taga/domain": "workspace:*",
+    "better-sqlite3": "^12.11.1"
+  }
+}

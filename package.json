@@ -1,0 +1,39 @@
+{
+  "name": "taga",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@10.32.1",
+  "engines": {
+    "node": ">=22 <25"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "evaluate:semantic": "node scripts/evaluate-semantic.mjs",
+    "evaluate:semantic:strict": "node scripts/evaluate-semantic.mjs --suite=strict-300",
+    "test": "vitest run",
+    "lint": "eslint . --max-warnings=0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@zvec/zvec",
+      "better-sqlite3"
+    ]
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/node": "^24.10.1",
+    "eslint": "^9.39.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.3",
+    "vitest": "^4.0.8"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "4.3.2",
+    "@types/better-sqlite3": "^7.6.13",
+    "@zvec/zvec": "0.8.0",
+    "better-sqlite3": "^12.11.1",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.7"
+  }
+}

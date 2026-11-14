@@ -1,0 +1,932 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-11-13T09:44:05.673Z",
+  "evidenceKind": "sanitized-offline-golden-set",
+  "limitations": [
+    "This fixture is sanitized offline evidence and is not a substitute for production query logs.",
+    "Latency and memory results are hardware-specific.",
+    "Only the current host platform is validated by this report."
+  ],
+  "model": {
+    "provider": "transformers.js",
+    "model": "Xenova/bge-m3",
+    "dimensions": 1024,
+    "maxTokens": 8192,
+    "batchSize": 4,
+    "pooling": "mean",
+    "normalized": true,
+    "implementationVersion": "taga-embedding-v1",
+    "fingerprint": "sha256:ffd1efef170f11b12b57985cd9bd1d41609002a454c26737d88fb982e43b775d"
+  },
+  "system": {
+    "node": "v24.11.1",
+    "platform": "win32",
+    "arch": "x64",
+    "cpu": "Intel(R) Core(TM) i5-10210U CPU @ 1.60GHz",
+    "logicalCpus": 8,
+    "totalMemoryMb": 40710.8086,
+    "freeMemoryMbAtEnd": 12263.9258
+  },
+  "dataset": {
+    "memories": 22,
+    "queries": 19
+  },
+  "quality": {
+    "lexical": {
+      "queries": 19,
+      "recallAt5": 0.4737,
+      "recallAt10": 0.4737,
+      "precisionAt5": 0.1754,
+      "mrr": 0.4123,
+      "ndcgAt10": 0.4279,
+      "zeroResultRate": 0.5263
+    },
+    "semantic": {
+      "queries": 19,
+      "recallAt5": 1,
+      "recallAt10": 1,
+      "precisionAt5": 0.2,
+      "mrr": 0.9123,
+      "ndcgAt10": 0.9348,
+      "zeroResultRate": 0
+    },
+    "hybrid": {
+      "queries": 19,
+      "recallAt5": 1,
+      "recallAt10": 1,
+      "precisionAt5": 0.2,
+      "mrr": 0.886,
+      "ndcgAt10": 0.9154,
+      "zeroResultRate": 0
+    },
+    "averageLexicalHybridOverlapAt10": 0.2474
+  },
+  "governance": {
+    "forbiddenIds": [
+      "excluded-secret",
+      "stale-retry",
+      "superseded-migration",
+      "forgotten-token"
+    ],
+    "leakCount": 0,
+    "leaks": []
+  },
+  "latency": {
+    "coldEmbedMs": 9681.2377,
+    "documentBatchEmbedMs": 11599.6296,
+    "documentEmbeddingsPerSecond": 1.8966,
+    "indexUpsertMs": 319.155,
+    "indexDocumentsPerSecond": 68.932,
+    "lexicalQuery": {
+      "samples": 19,
+      "minMs": 1.2793,
+      "p50Ms": 3.6601,
+      "p95Ms": 26.7939,
+      "maxMs": 26.7939,
+      "averageMs": 4.9956
+    },
+    "warmEmbedding": {
+      "samples": 20,
+      "minMs": 236.3275,
+      "p50Ms": 343.3348,
+      "p95Ms": 714.4832,
+      "maxMs": 801.5676,
+      "averageMs": 395.0633
+    },
+    "zvecQuery": {
+      "samples": 20,
+      "minMs": 3.417,
+      "p50Ms": 6.7028,
+      "p95Ms": 55.4441,
+      "maxMs": 61.0561,
+      "averageMs": 16.8817
+    },
+    "hybridEndToEnd": {
+      "samples": 20,
+      "minMs": 259.1066,
+      "p50Ms": 427.4625,
+      "p95Ms": 740.892,
+      "maxMs": 751.6,
+      "averageMs": 447.4332
+    }
+  },
+  "resources": {
+    "rssBeforeModelMb": 73.6289,
+    "rssAfterModelMb": 1585.8945,
+    "peakRssMb": 1642.0313,
+    "semanticIndexBytes": 5180998
+  },
+  "gates": {
+    "passed": true,
+    "thresholds": {
+      "recallAt10Gain": 0.1,
+      "precisionAt5MaxRegression": 0.05,
+      "ndcgAt10MaxRegression": 0.05,
+      "coldEmbedMs": 30000,
+      "warmEmbeddingP95Ms": 1000,
+      "zvecQueryP95Ms": 100,
+      "hybridP95Ms": 1500,
+      "peakRssMb": 4096
+    },
+    "checks": {
+      "recallAt10Gain": true,
+      "precisionAt5": true,
+      "ndcgAt10": true,
+      "governanceLeaks": true,
+      "coldEmbed": true,
+      "warmEmbeddingP95": true,
+      "zvecQueryP95": true,
+      "hybridP95": true,
+      "peakRss": true
+    }
+  },
+  "queries": [
+    {
+      "id": "exact-retry",
+      "query": "exponential backoff jitter",
+      "scope": null,
+      "relevantIds": [
+        "retry-backoff"
+      ],
+      "lexicalIds": [
+        "retry-backoff",
+        "alpha-blue-green",
+        "flaky-ci",
+        "tls-expiry",
+        "single-writer",
+        "dependency-lock"
+      ],
+      "semanticIds": [
+        "retry-backoff",
+        "node-heap",
+        "local-model",
+        "dependency-lock",
+        "memory-chunking",
+        "abort-controller",
+        "config-file",
+        "single-writer",
+        "flaky-ci",
+        "cache-invalidation"
+      ],
+      "hybridIds": [
+        "retry-backoff",
+        "flaky-ci",
+        "dependency-lock",
+        "single-writer",
+        "alpha-blue-green",
+        "tls-expiry",
+        "node-heap",
+        "local-model",
+        "memory-chunking",
+        "abort-controller"
+      ],
+      "latencyMs": {
+        "lexical": 9.021,
+        "semantic": 329.7016,
+        "hybridFusion": 7.3244
+      }
+    },
+    {
+      "id": "semantic-retry-zh",
+      "query": "临时网络错误应该怎样延迟后重试",
+      "scope": null,
+      "relevantIds": [
+        "retry-backoff"
+      ],
+      "lexicalIds": [],
+      "semanticIds": [
+        "retry-backoff",
+        "least-privilege",
+        "abort-controller",
+        "flaky-ci",
+        "node-heap",
+        "cache-invalidation",
+        "dependency-lock",
+        "cookie-samesite",
+        "sqlite-rollback",
+        "config-file"
+      ],
+      "hybridIds": [
+        "retry-backoff",
+        "least-privilege",
+        "abort-controller",
+        "flaky-ci",
+        "node-heap",
+        "cache-invalidation",
+        "dependency-lock",
+        "cookie-samesite",
+        "sqlite-rollback",
+        "config-file"
+      ],
+      "latencyMs": {
+        "lexical": 4.2881,
+        "semantic": 234.5908,
+        "hybridFusion": 1.9039
+      }
+    },
+    {
+      "id": "semantic-migration-zh",
+      "query": "数据库结构升级失败后如何撤销",
+      "scope": null,
+      "relevantIds": [
+        "sqlite-rollback"
+      ],
+      "lexicalIds": [],
+      "semanticIds": [
+        "sqlite-rollback",
+        "cache-invalidation",
+        "retry-backoff",
+        "dependency-lock",
+        "flaky-ci",
+        "tls-expiry",
+        "structured-logging",
+        "config-file",
+        "abort-controller",
+        "node-heap"
+      ],
+      "hybridIds": [
+        "sqlite-rollback",
+        "cache-invalidation",
+        "retry-backoff",
+        "dependency-lock",
+        "flaky-ci",
+        "tls-expiry",
+        "structured-logging",
+        "config-file",
+        "abort-controller",
+        "node-heap"
+      ],
+      "latencyMs": {
+        "lexical": 1.2793,
+        "semantic": 223.5219,
+        "hybridFusion": 1.5462
+      }
+    },
+    {
+      "id": "semantic-heap",
+      "query": "JavaScript 进程内存不够怎么办",
+      "scope": null,
+      "relevantIds": [
+        "node-heap"
+      ],
+      "lexicalIds": [
+        "abort-controller",
+        "node-heap"
+      ],
+      "semanticIds": [
+        "node-heap",
+        "config-file",
+        "retry-backoff",
+        "abort-controller",
+        "least-privilege",
+        "memory-chunking",
+        "utf8-paths",
+        "cache-invalidation",
+        "dependency-lock",
+        "structured-logging"
+      ],
+      "hybridIds": [
+        "node-heap",
+        "abort-controller",
+        "config-file",
+        "retry-backoff",
+        "least-privilege",
+        "memory-chunking",
+        "utf8-paths",
+        "cache-invalidation",
+        "dependency-lock",
+        "structured-logging"
+      ],
+      "latencyMs": {
+        "lexical": 2.564,
+        "semantic": 213.9958,
+        "hybridFusion": 3.149
+      }
+    },
+    {
+      "id": "semantic-encoding",
+      "query": "中文文件名显示成乱码",
+      "scope": null,
+      "relevantIds": [
+        "utf8-paths"
+      ],
+      "lexicalIds": [],
+      "semanticIds": [
+        "utf8-paths",
+        "cache-invalidation",
+        "config-file",
+        "node-heap",
+        "dependency-lock",
+        "memory-chunking",
+        "least-privilege",
+        "sqlite-rollback",
+        "single-writer",
+        "flaky-ci"
+      ],
+      "hybridIds": [
+        "utf8-paths",
+        "cache-invalidation",
+        "config-file",
+        "node-heap",
+        "dependency-lock",
+        "memory-chunking",
+        "least-privilege",
+        "sqlite-rollback",
+        "single-writer",
+        "flaky-ci"
+      ],
+      "latencyMs": {
+        "lexical": 1.4861,
+        "semantic": 311.5734,
+        "hybridFusion": 1.4388
+      }
+    },
+    {
+      "id": "symbol",
+      "query": "AbortController cancellation",
+      "scope": null,
+      "relevantIds": [
+        "abort-controller"
+      ],
+      "lexicalIds": [
+        "abort-controller",
+        "beta-canary",
+        "config-file",
+        "sqlite-rollback",
+        "least-privilege",
+        "node-heap",
+        "cookie-samesite"
+      ],
+      "semanticIds": [
+        "abort-controller",
+        "retry-backoff",
+        "sqlite-rollback",
+        "cache-invalidation",
+        "single-writer",
+        "tls-expiry",
+        "node-heap",
+        "dependency-lock",
+        "cookie-samesite",
+        "least-privilege"
+      ],
+      "hybridIds": [
+        "abort-controller",
+        "sqlite-rollback",
+        "node-heap",
+        "least-privilege",
+        "cookie-samesite",
+        "beta-canary",
+        "config-file",
+        "retry-backoff",
+        "cache-invalidation",
+        "single-writer"
+      ],
+      "latencyMs": {
+        "lexical": 4.3172,
+        "semantic": 175.9152,
+        "hybridFusion": 5.8969
+      }
+    },
+    {
+      "id": "path",
+      "query": "_config.yaml",
+      "scope": null,
+      "relevantIds": [
+        "config-file"
+      ],
+      "lexicalIds": [
+        "config-file",
+        "dependency-lock"
+      ],
+      "semanticIds": [
+        "config-file",
+        "dependency-lock",
+        "local-model",
+        "node-heap",
+        "utf8-paths",
+        "retry-backoff",
+        "alpha-blue-green",
+        "sqlite-rollback",
+        "structured-logging",
+        "single-writer"
+      ],
+      "hybridIds": [
+        "config-file",
+        "dependency-lock",
+        "local-model",
+        "node-heap",
+        "utf8-paths",
+        "retry-backoff",
+        "alpha-blue-green",
+        "sqlite-rollback",
+        "structured-logging",
+        "single-writer"
+      ],
+      "latencyMs": {
+        "lexical": 4.2091,
+        "semantic": 277.7823,
+        "hybridFusion": 5.9921
+      }
+    },
+    {
+      "id": "offline-model",
+      "query": "禁止 embedding 模型联网下载",
+      "scope": null,
+      "relevantIds": [
+        "local-model"
+      ],
+      "lexicalIds": [
+        "local-model",
+        "single-writer",
+        "structured-logging"
+      ],
+      "semanticIds": [
+        "local-model",
+        "dependency-lock",
+        "retry-backoff",
+        "node-heap",
+        "abort-controller",
+        "single-writer",
+        "least-privilege",
+        "cookie-samesite",
+        "alpha-blue-green",
+        "beta-canary"
+      ],
+      "hybridIds": [
+        "local-model",
+        "single-writer",
+        "structured-logging",
+        "dependency-lock",
+        "retry-backoff",
+        "node-heap",
+        "abort-controller",
+        "least-privilege",
+        "cookie-samesite",
+        "alpha-blue-green"
+      ],
+      "latencyMs": {
+        "lexical": 7.7128,
+        "semantic": 243.4503,
+        "hybridFusion": 4.0021
+      }
+    },
+    {
+      "id": "writer-conflict",
+      "query": "向量数据库多进程同时写入冲突",
+      "scope": null,
+      "relevantIds": [
+        "single-writer"
+      ],
+      "lexicalIds": [],
+      "semanticIds": [
+        "sqlite-rollback",
+        "single-writer",
+        "node-heap",
+        "cache-invalidation",
+        "abort-controller",
+        "utf8-paths",
+        "structured-logging",
+        "retry-backoff",
+        "least-privilege",
+        "memory-chunking"
+      ],
+      "hybridIds": [
+        "sqlite-rollback",
+        "single-writer",
+        "node-heap",
+        "cache-invalidation",
+        "abort-controller",
+        "utf8-paths",
+        "structured-logging",
+        "retry-backoff",
+        "least-privilege",
+        "memory-chunking"
+      ],
+      "latencyMs": {
+        "lexical": 1.5438,
+        "semantic": 244.8512,
+        "hybridFusion": 6.6628
+      }
+    },
+    {
+      "id": "alpha-deploy",
+      "query": "项目如何无停机切换发布环境",
+      "scope": {
+        "kind": "project",
+        "id": "alpha"
+      },
+      "relevantIds": [
+        "alpha-blue-green"
+      ],
+      "lexicalIds": [],
+      "semanticIds": [
+        "alpha-blue-green",
+        "sqlite-rollback",
+        "dependency-lock",
+        "local-model",
+        "config-file",
+        "retry-backoff",
+        "node-heap",
+        "abort-controller",
+        "cache-invalidation",
+        "tls-expiry"
+      ],
+      "hybridIds": [
+        "alpha-blue-green",
+        "sqlite-rollback",
+        "dependency-lock",
+        "local-model",
+        "config-file",
+        "retry-backoff",
+        "node-heap",
+        "abort-controller",
+        "cache-invalidation",
+        "tls-expiry"
+      ],
+      "latencyMs": {
+        "lexical": 5.7703,
+        "semantic": 236.8175,
+        "hybridFusion": 2.5756
+      }
+    },
+    {
+      "id": "beta-deploy",
+      "query": "逐步放量并观察指标",
+      "scope": {
+        "kind": "project",
+        "id": "beta"
+      },
+      "relevantIds": [
+        "beta-canary"
+      ],
+      "lexicalIds": [],
+      "semanticIds": [
+        "flaky-ci",
+        "beta-canary",
+        "node-heap",
+        "dependency-lock",
+        "retry-backoff",
+        "single-writer",
+        "structured-logging",
+        "config-file",
+        "utf8-paths",
+        "cache-invalidation"
+      ],
+      "hybridIds": [
+        "flaky-ci",
+        "beta-canary",
+        "node-heap",
+        "dependency-lock",
+        "retry-backoff",
+        "single-writer",
+        "structured-logging",
+        "config-file",
+        "utf8-paths",
+        "cache-invalidation"
+      ],
+      "latencyMs": {
+        "lexical": 1.4012,
+        "semantic": 205.2137,
+        "hybridFusion": 1.1011
+      }
+    },
+    {
+      "id": "flaky-tests",
+      "query": "CI tests fail intermittently",
+      "scope": {
+        "kind": "project",
+        "id": "alpha"
+      },
+      "relevantIds": [
+        "flaky-ci"
+      ],
+      "lexicalIds": [
+        "flaky-ci",
+        "retry-backoff",
+        "dependency-lock",
+        "sqlite-rollback",
+        "alpha-blue-green",
+        "single-writer"
+      ],
+      "semanticIds": [
+        "flaky-ci",
+        "retry-backoff",
+        "cache-invalidation",
+        "single-writer",
+        "dependency-lock",
+        "least-privilege",
+        "structured-logging",
+        "utf8-paths",
+        "alpha-blue-green",
+        "abort-controller"
+      ],
+      "hybridIds": [
+        "flaky-ci",
+        "retry-backoff",
+        "dependency-lock",
+        "single-writer",
+        "alpha-blue-green",
+        "sqlite-rollback",
+        "cache-invalidation",
+        "least-privilege",
+        "structured-logging",
+        "utf8-paths"
+      ],
+      "latencyMs": {
+        "lexical": 3.6601,
+        "semantic": 234.347,
+        "hybridFusion": 4.8959
+      }
+    },
+    {
+      "id": "certificate",
+      "query": "证书过期前避免线上中断",
+      "scope": null,
+      "relevantIds": [
+        "tls-expiry"
+      ],
+      "lexicalIds": [],
+      "semanticIds": [
+        "tls-expiry",
+        "retry-backoff",
+        "least-privilege",
+        "cache-invalidation",
+        "cookie-samesite",
+        "abort-controller",
+        "node-heap",
+        "memory-chunking",
+        "flaky-ci",
+        "dependency-lock"
+      ],
+      "hybridIds": [
+        "tls-expiry",
+        "retry-backoff",
+        "least-privilege",
+        "cache-invalidation",
+        "cookie-samesite",
+        "abort-controller",
+        "node-heap",
+        "memory-chunking",
+        "flaky-ci",
+        "dependency-lock"
+      ],
+      "latencyMs": {
+        "lexical": 1.5354,
+        "semantic": 310.4554,
+        "hybridFusion": 1.9272
+      }
+    },
+    {
+      "id": "stale-cache",
+      "query": "缓存返回旧数据",
+      "scope": null,
+      "relevantIds": [
+        "cache-invalidation"
+      ],
+      "lexicalIds": [],
+      "semanticIds": [
+        "retry-backoff",
+        "sqlite-rollback",
+        "cache-invalidation",
+        "memory-chunking",
+        "node-heap",
+        "config-file",
+        "structured-logging",
+        "abort-controller",
+        "least-privilege",
+        "dependency-lock"
+      ],
+      "hybridIds": [
+        "retry-backoff",
+        "sqlite-rollback",
+        "cache-invalidation",
+        "memory-chunking",
+        "node-heap",
+        "config-file",
+        "structured-logging",
+        "abort-controller",
+        "least-privilege",
+        "dependency-lock"
+      ],
+      "latencyMs": {
+        "lexical": 1.7589,
+        "semantic": 240.6657,
+        "hybridFusion": 2.7534
+      }
+    },
+    {
+      "id": "cookie-security",
+      "query": "跨站请求 cookie 防护",
+      "scope": null,
+      "relevantIds": [
+        "cookie-samesite"
+      ],
+      "lexicalIds": [
+        "cookie-samesite"
+      ],
+      "semanticIds": [
+        "cookie-samesite",
+        "least-privilege",
+        "cache-invalidation",
+        "node-heap",
+        "sqlite-rollback",
+        "utf8-paths",
+        "tls-expiry",
+        "abort-controller",
+        "retry-backoff",
+        "memory-chunking"
+      ],
+      "hybridIds": [
+        "cookie-samesite",
+        "least-privilege",
+        "cache-invalidation",
+        "node-heap",
+        "sqlite-rollback",
+        "utf8-paths",
+        "tls-expiry",
+        "abort-controller",
+        "retry-backoff",
+        "memory-chunking"
+      ],
+      "latencyMs": {
+        "lexical": 5.3697,
+        "semantic": 600.2817,
+        "hybridFusion": 3.934
+      }
+    },
+    {
+      "id": "chunking",
+      "query": "长篇记忆切成有重叠的片段",
+      "scope": null,
+      "relevantIds": [
+        "memory-chunking"
+      ],
+      "lexicalIds": [],
+      "semanticIds": [
+        "memory-chunking",
+        "retry-backoff",
+        "node-heap",
+        "single-writer",
+        "flaky-ci",
+        "cache-invalidation",
+        "utf8-paths",
+        "sqlite-rollback",
+        "config-file",
+        "least-privilege"
+      ],
+      "hybridIds": [
+        "memory-chunking",
+        "retry-backoff",
+        "node-heap",
+        "single-writer",
+        "flaky-ci",
+        "cache-invalidation",
+        "utf8-paths",
+        "sqlite-rollback",
+        "config-file",
+        "least-privilege"
+      ],
+      "latencyMs": {
+        "lexical": 2.0335,
+        "semantic": 529.0018,
+        "hybridFusion": 1.8594
+      }
+    },
+    {
+      "id": "permissions",
+      "query": "403 token lacks required permissions",
+      "scope": null,
+      "relevantIds": [
+        "least-privilege"
+      ],
+      "lexicalIds": [
+        "least-privilege",
+        "beta-canary",
+        "flaky-ci",
+        "alpha-blue-green",
+        "dependency-lock",
+        "structured-logging",
+        "config-file",
+        "node-heap",
+        "sqlite-rollback",
+        "cookie-samesite"
+      ],
+      "semanticIds": [
+        "least-privilege",
+        "cookie-samesite",
+        "node-heap",
+        "cache-invalidation",
+        "tls-expiry",
+        "utf8-paths",
+        "retry-backoff",
+        "dependency-lock",
+        "structured-logging",
+        "config-file"
+      ],
+      "hybridIds": [
+        "least-privilege",
+        "dependency-lock",
+        "node-heap",
+        "cookie-samesite",
+        "structured-logging",
+        "config-file",
+        "beta-canary",
+        "flaky-ci",
+        "alpha-blue-green",
+        "sqlite-rollback"
+      ],
+      "latencyMs": {
+        "lexical": 7.936,
+        "semantic": 328.1684,
+        "hybridFusion": 9.6126
+      }
+    },
+    {
+      "id": "logging",
+      "query": "日志里记录错误码但不能泄漏秘密",
+      "scope": null,
+      "relevantIds": [
+        "structured-logging"
+      ],
+      "lexicalIds": [],
+      "semanticIds": [
+        "structured-logging",
+        "cache-invalidation",
+        "utf8-paths",
+        "config-file",
+        "retry-backoff",
+        "tls-expiry",
+        "least-privilege",
+        "memory-chunking",
+        "cookie-samesite",
+        "flaky-ci"
+      ],
+      "hybridIds": [
+        "structured-logging",
+        "cache-invalidation",
+        "utf8-paths",
+        "config-file",
+        "retry-backoff",
+        "tls-expiry",
+        "least-privilege",
+        "memory-chunking",
+        "cookie-samesite",
+        "flaky-ci"
+      ],
+      "latencyMs": {
+        "lexical": 2.2365,
+        "semantic": 371.0649,
+        "hybridFusion": 3.3575
+      }
+    },
+    {
+      "id": "lockfile",
+      "query": "CI dependency versions must be reproducible",
+      "scope": null,
+      "relevantIds": [
+        "dependency-lock"
+      ],
+      "lexicalIds": [
+        "beta-canary",
+        "flaky-ci",
+        "dependency-lock",
+        "retry-backoff",
+        "cache-invalidation",
+        "local-model",
+        "tls-expiry",
+        "alpha-blue-green",
+        "node-heap",
+        "cookie-samesite"
+      ],
+      "semanticIds": [
+        "dependency-lock",
+        "flaky-ci",
+        "cache-invalidation",
+        "single-writer",
+        "retry-backoff",
+        "sqlite-rollback",
+        "beta-canary",
+        "node-heap",
+        "utf8-paths",
+        "local-model"
+      ],
+      "hybridIds": [
+        "flaky-ci",
+        "dependency-lock",
+        "beta-canary",
+        "cache-invalidation",
+        "retry-backoff",
+        "local-model",
+        "node-heap",
+        "tls-expiry",
+        "alpha-blue-green",
+        "cookie-samesite"
+      ],
+      "latencyMs": {
+        "lexical": 26.7939,
+        "semantic": 348.3521,
+        "hybridFusion": 7.4969
+      }
+    }
+  ]
+}
