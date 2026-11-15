@@ -8,6 +8,8 @@ export interface LlmConfig {
   readonly model: string;
   readonly timeoutMs: number;
   readonly providerName: string;
+  /** Maximum LLM calls per UTC day; beyond the cap callers fail over to local paths. */
+  readonly dailyCap?: number;
 }
 
 export function llmConfigFromEnv(env: NodeJS.ProcessEnv = process.env): LlmConfig {
@@ -16,6 +18,7 @@ export function llmConfigFromEnv(env: NodeJS.ProcessEnv = process.env): LlmConfi
   const endpoint = env.TAGA_LLM_ENDPOINT ?? '';
   const model = env.TAGA_LLM_MODEL ?? '';
   const apiKey = env.TAGA_LLM_API_KEY;
+  const dailyCap = positiveInt(env.TAGA_LLM_DAILY_CAP, 0);
   return {
     mode: requestedMode === 'off' || endpoint.length === 0 || model.length === 0 ? 'off' : requestedMode,
     endpoint,
@@ -23,6 +26,7 @@ export function llmConfigFromEnv(env: NodeJS.ProcessEnv = process.env): LlmConfi
     model,
     timeoutMs: positiveInt(env.TAGA_LLM_TIMEOUT_MS, 30_000),
     providerName: env.TAGA_LLM_PROVIDER_NAME ?? 'openai-compatible',
+    ...(dailyCap > 0 ? { dailyCap } : {}),
   };
 }
 

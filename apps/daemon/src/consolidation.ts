@@ -14,7 +14,7 @@ import { GardenService } from '../../../packages/garden/src/index.js';
 import type { NotificationService } from '../../../packages/notifications/src/index.js';
 import { enqueueSemanticUpsert, ZvecMemoryIndex } from '../../../packages/semantic-index/src/index.js';
 import { FtsRetrievalProvider } from '../../../packages/retrieval/src/index.js';
-import { FetchOpenAiCompatibleProvider, type StructuredCompletionProvider } from '../../../packages/distillation/src/index.js';
+import { FetchOpenAiCompatibleProvider, withDailyCap, type StructuredCompletionProvider } from '../../../packages/distillation/src/index.js';
 import { MarkdownMemoryRepository, type DatabaseStore, type JobRecord, type StoredMemory } from '../../../packages/storage/src/index.js';
 import { LlmMergeJudge } from './consolidation-llm.js';
 
@@ -242,10 +242,11 @@ function reportOverlap(
 
 function createMergeJudge(config: ConsolidationConfig): LlmMergeJudge | undefined {
   if (config.llm === undefined) return undefined;
-  const provider: StructuredCompletionProvider = new FetchOpenAiCompatibleProvider({
+  let provider: StructuredCompletionProvider = new FetchOpenAiCompatibleProvider({
     endpoint: config.llm.endpoint,
     ...(config.llm.apiKey === undefined ? {} : { apiKey: config.llm.apiKey }),
   });
+  if (config.llm.dailyCap !== undefined) provider = withDailyCap(provider, config.llm.dailyCap);
   return new LlmMergeJudge(provider, config.llm.model, config.llm.timeoutMs);
 }
 

@@ -43,8 +43,10 @@ import {
   parseMemory,
   type ContextPack,
   type Memory,
+  type MemoryType,
   type SourceRef,
 } from '../../../packages/domain/src/index.js';
+import { runLearn, runLearnWatch } from '../../../packages/learning/src/index.js';
 import { FtsRetrievalProvider } from '../../../packages/retrieval/src/index.js';
 import { createLocalBgeM3Embedder } from '../../../packages/embedding/src/index.js';
 import {
@@ -230,6 +232,8 @@ async function dispatch(args: ParsedArgs, context: CliContext): Promise<CliRespo
       return packCommand(subcommand, context);
     case 'review':
       return reviewCommand(subcommand, args.positionals, context);
+    case 'learn':
+      return learnCommand(context);
     default:
       throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', `unknown command: ${root}`);
   }
@@ -1346,6 +1350,66 @@ function isNotificationFeedback(value: string | undefined): value is Notificatio
 function parseGardenStatus(value: string): GardenProposalStatus {
   if (value === 'pending' || value === 'accepted' || value === 'rejected' || value === 'ignored') return value;
   throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', `unsupported garden proposal status: ${value}`);
+}
+
+const LEARN_TYPES: readonly string[] = ['preferences', 'environment', 'procedures', 'lessons', 'projects'];
+
+async function learnCommand(context: CliContext): Promise<CliResponse> {
+  const text = optionString(context.options, 'text');
+  const file = optionString(context.options, 'file');
+  const dir = optionString(context.options, 'dir');
+  const url = optionString(context.options, 'url');
+  if (text === undefined && file === undefined && dir === undefined && url === undefined) {
+    throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', 'learn requires one of --text, --file, --dir, --url');
+  }
+  const type = optionString(context.options, 'type');
+  if (type !== undefined && !LEARN_TYPES.includes(type)) {
+    throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', `unsupported learn type: ${type}; expected one of ${LEARN_TYPES.join(', ')}`);
+  }
+  const include = optionString(context.options, 'include');
+  const project = optionString(context.options, 'project');
+  const maxBlocks = numberOption(context.options, 'max-blocks');
+  const intervalMs = numberOption(context.options, 'interval-ms');
+  const maxCycles = numberOption(context.options, 'max-cycles');
+  await ensurePrivateDirectory(context.brainPath);
+  if (context.options.get('watch') === true) {
+    if (dir === undefined) throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', 'learn --watch requires --dir=<path>');
+    const controller = new AbortController();
+    process.once('SIGINT', () => controller.abort());
+    process.once('SIGTERM', () => controller.abort());
+    const reports = await runLearnWatch({
+      dir,
+      ...(include === undefined ? {} : { include }),
+      ...(type === undefined ? {} : { type: type as MemoryType }),
+      ...(project === undefined ? {} : { project }),
+      allowNetwork: context.options.get('allow-network') === true,
+    }, {
+      brainPath: context.brainPath,
+      ...(intervalMs === undefined ? {} : { intervalMs }),
+      ...(maxCycles === undefined ? {} : { maxCycles }),
+      signal: controller.signal,
+    });
+    const totals = reports.reduce((sum, report) => ({
+      blocks: sum.blocks + report.blocks,
+      candidates: sum.candidates + report.candidates,
+      duplicates: sum.duplicates + report.duplicates,
+    }), { blocks: 0, candidates: 0, duplicates: 0 });
+    return { ok: true, code: 'LEARN_WATCH_STOPPED', message: 'learn watch stopped', data: { cycles: reports.length, ...totals, reports } };
+  }
+  const report = await runLearn({
+    ...(text === undefined ? {} : { text }),
+    ...(file === undefined ? {} : { file }),
+    ...(dir === undefined ? {} : { dir }),
+    ...(url === undefined ? {} : { url }),
+    ...(include === undefined ? {} : { include }),
+    ...(type === undefined ? {} : { type: type as MemoryType }),
+    ...(project === undefined ? {} : { project }),
+    allowNetwork: context.options.get('allow-network') === true,
+  }, {
+    brainPath: context.brainPath,
+    ...(maxBlocks === undefined ? {} : { maxBlocks }),
+  });
+  return { ok: true, code: 'LEARN_COMPLETED', message: 'learn run completed', data: report };
 }
 
 function requestedAgentIds(value: string, registry: AgentAdapterRegistry): readonly string[] {

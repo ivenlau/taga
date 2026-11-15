@@ -163,6 +163,40 @@ TAGA_LLM_TIMEOUT_MS=3000
 
 MCP `memory_search` 支持显式 `include_draft: true`（CLI 为 `memory search --include-draft`），draft 结果以 `status:draft:unverified` 标记并降权 0.5。默认召回与静态 Context Pack 仍仅包含 active 记忆。搜索结果的 `proof` 字段与 `proof:useful:N` / `proof:verified` match-reason 标记展示每条记忆的反馈佐证，供调用方自行加权。
 
+## 用户指定知识学习（`taga learn`）
+
+把文字、文件、文件夹或网页内容喂给 Taga 学习——内容经脱敏、切块、语义去重后由蒸馏管道提炼为候选记忆，进审核队列：
+
+```bash
+node dist/apps/cli/src/main.js learn --text="..." --type=lessons
+node dist/apps/cli/src/main.js learn --file=D:\notes\arch.md
+node dist/apps/cli/src/main.js learn --dir=D:\notes --include=.md,.txt
+node dist/apps/cli/src/main.js learn --url=https://example.com/post --allow-network
+```
+
+- 提炼而非全文存储：每个知识块蒸馏出 1~3 条事实型 candidate，原文位置（file/url + hash）存入 sources 可随时溯源
+- 学习前语义去重：与现有 active 记忆比 BGE-M3 余弦，≥0.95 直接跳过（省 LLM 调用）；distill 管道同样挂了 `duplicateGate`（候选级语义去重）
+- **网络安全**：URL 学习默认拒绝，`TAGA_LEARN_ALLOW_NETWORK=1` 显式开启；抓取内容过脱敏规则后才入库
+- 防跑飞：默认跳过 `node_modules`/`.git`/隐藏目录，单文件 ≤512KB，单次 ≤50 块（`--max-blocks` 可调）
+- MCP 侧提供 `knowledge_ingest` 工具：agent 可以把用户口述的知识入队，daemon 后台蒸馏
+- **目录监视**：`learn --watch --dir=D:
+otes [--interval-ms=30000]` 前台轮询，文件 hash 增量状态持久化，新/变更文件自动学习，Ctrl+C 退出
+
+## Reflect 周期反思（可选）
+
+`TAGA_REFLECT_MODE=on` 后，daemon 按周（`TAGA_REFLECT_INTERVAL_MS`，默认 7 天）把近期活跃的 active 记忆按类型+作用域分组（组内 ≥ `TAGA_REFLECT_MIN_GROUP` 条，默认 3），交给 LLM 提炼一条**更高层的洞察 candidate**（"这些记忆共同指向什么规律"），进审核队列。相关环境变量：
+
+```bash
+TAGA_REFLECT_MODE=off            # on 开启周期反思
+TAGA_REFLECT_INTERVAL_MS=604800000
+TAGA_REFLECT_WINDOW_DAYS=7       # 只反思窗口内活跃的记忆
+TAGA_REFLECT_MIN_GROUP=3
+TAGA_REFLECT_MAX_GROUPS=5
+```
+
+反思需要 LLM（`TAGA_LLM_MODE=on`）：每次反思产生 1 条洞察 candidate + `reflect.completed`/`reflect.group` 审计事件。冗余合并建议先通过审计与通知提示，机制化的 garden supersede 提案规划在后续版本。
+- **纠错学习**：`memory_feedback kind=conflict` 会自动触发一次以冲突上下文为证据的蒸馏（原记忆哪不可靠、正确是什么），产出的修正 lessons candidate 同样进审核队列，每条记忆每天最多触发一次
+
 ## LLM 适配（可选）
 
 Taga 的 LLM 能力默认关闭。设置以下环境变量后，OpenAI 兼容端点会驱动两个消费点：

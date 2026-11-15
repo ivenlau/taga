@@ -8,6 +8,7 @@ import {
   consolidationConfigFromEnv,
   enqueueScheduledConsolidationScan,
 } from '../../../packages/application/src/index.js';
+import { enqueueScheduledReflectScan, reflectConfigFromEnv } from '../../../packages/learning/src/index.js';
 import { AgentIngestionService, AutomaticSourceRuntime } from './ingestion.js';
 import { AgentAcceptanceService } from './acceptance.js';
 import {
@@ -47,6 +48,13 @@ export async function createDefaultDaemonRuntime(brainPath: string): Promise<Dae
         id: 'consolidation-scheduler',
         run(): Promise<void> {
           enqueueScheduledConsolidationScan(database, consolidationConfigFromEnv(), new Date());
+          return Promise.resolve();
+        },
+      },
+      {
+        id: 'reflect-scheduler',
+        run(): Promise<void> {
+          enqueueScheduledReflectScan(database, reflectConfigFromEnv(), new Date());
           return Promise.resolve();
         },
       },

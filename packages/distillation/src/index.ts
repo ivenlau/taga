@@ -5,8 +5,10 @@ import {
   ProactivePolicyService,
   DEFAULT_PROACTIVE_POLICY,
   GovernanceService,
+  llmConfigFromEnv,
   type AuditLog,
   type LifecycleActor,
+  type LlmConfig,
   type MemoryRepository,
 } from '../../application/src/index.js';
 import {
@@ -206,6 +208,29 @@ export function createLlmProvider(config: { readonly mode: 'off' | 'shadow' | 'o
   });
 }
 
+export function withDailyCap(
+  provider: StructuredCompletionProvider,
+  cap: number,
+  clock: () => Date = () => new Date(),
+): StructuredCompletionProvider {
+  let day = clock().toISOString().slice(0, 10);
+  let count = 0;
+  return {
+    complete: (request: StructuredCompletionRequest): Promise<StructuredCompletionResponse> => {
+      const today = clock().toISOString().slice(0, 10);
+      if (today !== day) {
+        day = today;
+        count = 0;
+      }
+      if (count >= cap) {
+        return Promise.reject(new Error(`llm daily cap reached (${cap} calls on ${day})`));
+      }
+      count += 1;
+      return provider.complete(request);
+    },
+  };
+}
+
 function readOpenAiUsage(payload: unknown): { readonly inputTokens?: number; readonly outputTokens?: number } {
   if (typeof payload !== 'object' || payload === null) return {};
   const usage = (payload as Record<string, unknown>).usage;
@@ -396,12 +421,19 @@ export class DistillationService {
   }
 }
 
+export interface SemanticDuplicateVerdict {
+  readonly duplicate: boolean;
+  readonly duplicateOf?: string;
+  readonly score?: number;
+}
+
 export interface AutomaticDistillationOptions {
   readonly clock?: () => Date;
   readonly policy?: ConstructorParameters<typeof ProactivePolicyService>[1];
   readonly audit?: AuditLog;
   readonly memories?: MemoryRepository;
   readonly notifications?: NotificationService;
+  readonly duplicateGate?: (candidate: Candidate) => Promise<SemanticDuplicateVerdict | undefined>;
 }
 
 export interface AutomaticDistillationReport {
@@ -467,6 +499,14 @@ export class AutomaticDistillationService {
         duplicates += 1;
         reasons.push(`${proposed.id}:duplicate-memory:${matchingMemory.id}`);
         await this.recordDecision('distillation.duplicate', proposed.id, 'duplicate-memory', { duplicateOf: matchingMemory.id });
+        continue;
+      }
+      const gate = this.options.duplicateGate === undefined ? undefined : await this.options.duplicateGate(proposed);
+      if (gate !== undefined && gate.duplicate) {
+        this.candidates.save({ ...proposed, decisionReason: 'semantic-duplicate', ...(gate.duplicateOf === undefined ? {} : { duplicateOf: gate.duplicateOf }) });
+        duplicates += 1;
+        reasons.push(`${proposed.id}:semantic-duplicate:${gate.duplicateOf ?? 'unknown'}`);
+        await this.recordDecision('distillation.semantic_duplicate', proposed.id, 'semantic-duplicate', { ...(gate.duplicateOf === undefined ? {} : { duplicateOf: gate.duplicateOf }), ...(gate.score === undefined ? {} : { score: gate.score }) });
         continue;
       }
       candidates += 1;
@@ -837,4 +877,66 @@ function lexicalSimilarity(left: string, right: string): number {
   if (leftTokens.size === 0 || rightTokens.size === 0) return 0;
   const intersection = [...leftTokens].filter((token) => rightTokens.has(token)).length;
   return intersection / new Set([...leftTokens, ...rightTokens]).size;
+}
+
+
+export interface DistillerChainOptions {
+  readonly audit?: AuditLog;
+  readonly llm?: LlmConfig;
+  readonly provider?: StructuredCompletionProvider;
+}
+
+export function buildDistillerChain(options: DistillerChainOptions = {}): Distiller {
+  const llm = options.llm ?? llmConfigFromEnv();
+  const deterministic = new FakeDistiller('deterministic-auto', 'm3');
+  if (llm.mode === 'off') return deterministic;
+  const baseProvider = options.provider ?? createLlmProvider(llm);
+  if (baseProvider === undefined) return deterministic;
+  const provider = llm.dailyCap === undefined ? baseProvider : withDailyCap(baseProvider, llm.dailyCap);
+  const llmDistiller = new LlmDistiller({
+    provider,
+    providerName: llm.providerName,
+    model: llm.model,
+    timeoutMs: llm.timeoutMs,
+  });
+  if (llm.mode === 'shadow') {
+    return new ShadowDistiller(deterministic, llmDistiller, (comparison) => {
+      void options.audit?.append({
+        eventType: 'distill.llm_shadow',
+        actor: 'daemon',
+        subjectType: 'distillation',
+        subjectId: `shadow-${randomUUID()}`,
+        occurredAt: new Date().toISOString(),
+        reason: comparison.error === undefined ? 'llm shadow comparison recorded' : 'llm shadow provider failed',
+        payload: {
+          deterministicTitle: comparison.deterministic.title,
+          deterministicMode: comparison.deterministic.model?.mode,
+          ...(comparison.shadow === null
+            ? {}
+            : {
+                shadowTitle: comparison.shadow.title,
+                shadowMode: comparison.shadow.model?.mode,
+                ...(comparison.shadow.model?.inputTokens === undefined ? {} : { shadowInputTokens: comparison.shadow.model?.inputTokens }),
+                ...(comparison.shadow.model?.outputTokens === undefined ? {} : { shadowOutputTokens: comparison.shadow.model?.outputTokens }),
+                ...(comparison.shadow.model?.latencyMs === undefined ? {} : { shadowLatencyMs: comparison.shadow.model?.latencyMs }),
+              }),
+          ...(comparison.error === undefined ? {} : { error: comparison.error }),
+        },
+      }).catch(() => undefined);
+    });
+  }
+  if (llm.mode === 'on') {
+    return new FallbackDistiller(llmDistiller, deterministic, (event) => {
+      void options.audit?.append({
+        eventType: 'distill.llm_fallback',
+        actor: 'daemon',
+        subjectType: 'distillation',
+        subjectId: `fallback-${randomUUID()}`,
+        occurredAt: new Date().toISOString(),
+        reason: event.reason,
+        payload: { provider: event.provider, model: event.model, evidenceCount: event.evidenceIds.length },
+      }).catch(() => undefined);
+    });
+  }
+  return deterministic;
 }

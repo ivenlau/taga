@@ -3,15 +3,23 @@ import { join } from 'node:path';
 import { JsonLogger, type Logger } from '../../../packages/observability/src/index.js';
 import { RecoveryService } from '../../../packages/recovery/src/index.js';
 import { GardenService } from '../../../packages/garden/src/index.js';
+import {
+  createSemanticDuplicateChecker,
+  REFLECT_JOB_KIND,
+  runCorrectionLearn,
+  runLearn,
+  runReflect,
+  type LearnInput,
+} from '../../../packages/learning/src/index.js';
 import { MetricsService } from '../../../packages/metrics/src/index.js';
-import { SqliteAuditLog } from '../../../packages/application/src/index.js';
+import { SqliteAuditLog, llmConfigFromEnv } from '../../../packages/application/src/index.js';
 import { AutomaticDistillationService } from '../../../packages/distillation/src/index.js';
 import { NotificationService } from '../../../packages/notifications/src/index.js';
 import { MarkdownMemoryRepository } from '../../../packages/storage/src/index.js';
 import { DatabaseStore, type JobRecord } from '../../../packages/storage/src/index.js';
 import { semanticJobHandlers } from './semantic.js';
 import { consolidationJobHandlers } from './consolidation.js';
-import { buildDistillerChain } from './llm-chain.js';
+import { buildDistillerChain } from '../../../packages/distillation/src/index.js';
 import {
   DaemonLease,
   stopRequested,
@@ -174,11 +182,28 @@ export class DaemonRuntime {
 export function defaultJobHandlers(brainPath: string, database: DatabaseStore): ReadonlyMap<string, DaemonJobHandler> {
   const audit = new SqliteAuditLog(database);
   const notifications = new NotificationService(database, audit);
+  const duplicateChecker = createSemanticDuplicateChecker(brainPath);
   return new Map<string, DaemonJobHandler>([
     ...semanticJobHandlers(brainPath, database),
     ...consolidationJobHandlers(brainPath, database, { notifications }),
     ['reindex', async () => {
       await new RecoveryService(brainPath, database).reindex();
+    }],
+    ['learn.distill', async (job) => {
+      const input = JSON.parse(job.payload) as LearnInput;
+      await runLearn(input, { brainPath, audit });
+    }],
+    ['learn.correction', async (job) => {
+      const payload = JSON.parse(job.payload) as { memoryId?: unknown; note?: unknown; project?: unknown };
+      if (typeof payload.memoryId !== 'string') throw new Error('learn.correction payload memoryId is invalid');
+      await runCorrectionLearn({
+        memoryId: payload.memoryId,
+        ...(typeof payload.note === 'string' && payload.note.length > 0 ? { note: payload.note } : {}),
+        ...(typeof payload.project === 'string' ? { project: payload.project } : {}),
+      }, { brainPath, audit });
+    }],
+    [REFLECT_JOB_KIND, async () => {
+      await runReflect({}, { brainPath, audit, llm: llmConfigFromEnv() });
     }],
     ['garden.scan', async () => {
       const memories = await new MarkdownMemoryRepository(brainPath).list();
@@ -209,6 +234,9 @@ export function defaultJobHandlers(brainPath: string, database: DatabaseStore): 
           audit,
           memories: new MarkdownMemoryRepository(brainPath),
           notifications,
+          ...(duplicateChecker === undefined ? {} : {
+            duplicateGate: async (candidate) => duplicateChecker(`${candidate.title}\n${candidate.summary}`),
+          }),
         },
       ).run(payload);
     }],

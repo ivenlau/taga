@@ -8,6 +8,7 @@ import {
   SqliteAuditLog,
   enqueueConsolidationScan,
 } from '../../../packages/application/src/index.js';
+import { enqueueLearnCorrection } from '../../../packages/learning/src/index.js';
 import {
   contentHash,
   DatabaseStore,
@@ -152,6 +153,12 @@ const brainDetailInputSchema = z.object({
   include_evidence: z.boolean().default(false),
 });
 
+const knowledgeIngestInputSchema = z.object({
+  content: z.string().min(1).max(200_000),
+  type: z.enum(['preferences', 'environment', 'procedures', 'lessons', 'projects']).optional(),
+  project: z.string().min(1).optional(),
+});
+
 const toolCallSchema = z.object({
   jsonrpc: z.literal('2.0'),
   id: z.union([z.string(), z.number(), z.null()]),
@@ -213,6 +220,7 @@ const tools: readonly McpTool[] = [
   { name: 'brain_summary', version: 'v1', description: 'Summarize visible Brain partitions and statuses.' },
   { name: 'brain_detail', version: 'v1', description: 'Read Brain relations and optionally expand body or Evidence references.' },
   { name: 'brain_rebuild', version: 'v1', description: 'Rebuild derived Brain relations from canonical Markdown.' },
+  { name: 'knowledge_ingest', version: 'v1', description: 'Queue user-supplied knowledge text for distillation into reviewable candidates.' },
 ];
 
 const mcpProtocolVersion = '2025-06-18';
@@ -233,6 +241,7 @@ const toolInputSchemas: Readonly<Record<string, z.ZodType | undefined>> = {
   brain_summary: undefined,
   brain_detail: brainDetailInputSchema,
   brain_rebuild: undefined,
+  knowledge_ingest: knowledgeIngestInputSchema,
 };
 
 interface McpToolDefinition {
@@ -336,8 +345,36 @@ export class LiteMcpServer {
         return this.brainDetail(input);
       case 'brain_rebuild':
         return this.brainRebuild();
+      case 'knowledge_ingest':
+        return this.knowledgeIngest(input);
       default:
         throw new Error(`unknown tool: ${name}`);
+    }
+  }
+
+  private knowledgeIngest(input: Record<string, unknown>): Promise<unknown> {
+    const parsed = knowledgeIngestInputSchema.parse(input);
+    const database = new DatabaseStore(join(this.brainPath, 'taga.db'));
+    try {
+      const jobId = `learn-distill-${contentHash(parsed.content)}`;
+      const queued = database.enqueueJobIfAbsent({
+        id: jobId,
+        kind: 'learn.distill',
+        payload: JSON.stringify({
+          text: parsed.content,
+          ...(parsed.type === undefined ? {} : { type: parsed.type }),
+          ...(parsed.project === undefined ? {} : { project: parsed.project }),
+        }),
+      });
+      return Promise.resolve({
+        ok: true,
+        data: { queued, job_id: jobId, status_hint: queued ? 'the daemon will distill this into reviewable candidates' : 'this content is already queued' },
+        degraded: false,
+        warnings: [],
+        next_actions: [{ tool: 'brain_summary' }],
+      });
+    } finally {
+      database.close();
     }
   }
 
@@ -867,6 +904,13 @@ export class LiteMcpServer {
       }
       enqueueSemanticUpsert(database, updated.id, updated.contentHash);
       enqueueConsolidationScan(database);
+      if (parsed.kind === 'conflict') {
+        enqueueLearnCorrection(database, {
+          memoryId: parsed.memory_id,
+          ...(parsed.note === undefined ? {} : { note: parsed.note }),
+          ...(parsed.project_id === undefined ? {} : { project: parsed.project_id }),
+        });
+      }
       return { ok: true, data: { memory_id: updated.id, kind: parsed.kind, useful_count: updated.usefulCount, not_useful_count: updated.notUsefulCount }, degraded: false, warnings: [], next_actions: [] };
     } finally {
       database.close();

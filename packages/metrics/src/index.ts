@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { SqliteAuditLog } from '../../application/src/index.js';
+import { DatabaseCandidateRepository } from '../../distillation/src/index.js';
 import { ProcedureService, type ProcedureReuseKind } from '../../procedures/src/index.js';
 import type { DatabaseStore } from '../../storage/src/index.js';
 
@@ -90,9 +91,19 @@ export interface DigestReport {
   readonly scope: MetricScope;
   readonly findings: readonly DigestFinding[];
   readonly stats: StatsReport;
+  readonly learning: LearningEffectivenessReport;
   readonly throttled: boolean;
   readonly degraded: boolean;
   readonly warnings: readonly string[];
+}
+
+export interface LearningEffectivenessReport {
+  readonly window: MetricWindow;
+  readonly candidates: { readonly pending: number; readonly accepted: number; readonly rejected: number; readonly total: number };
+  readonly byMode: readonly { readonly mode: string; readonly created: number; readonly accepted: number; readonly acceptRate: number }[];
+  readonly learnRuns: number;
+  readonly llmShadowComparisons: number;
+  readonly llmFallbacks: number;
 }
 
 export interface MetricsQuery {
@@ -234,7 +245,8 @@ export class MetricsService {
   async digest(query: DigestQuery = {}): Promise<DigestReport> {
     const stats = await this.stats(query);
     const findings = findingsFor(stats.counts);
-    const fingerprint = createHash('sha256').update(JSON.stringify({ window: stats.window, scope: stats.scope, findings })).digest('hex');
+    const learning = await this.learningEffectiveness(query);
+    const fingerprint = createHash('sha256').update(JSON.stringify({ window: stats.window, scope: stats.scope, findings, learning })).digest('hex');
     const throttleKey = `digest:state:${scopeKey(stats.scope)}`;
     const prior = parseDigestState(this.database.getMetadata(throttleKey));
     const now = this.clock();
@@ -243,7 +255,45 @@ export class MetricsService {
     if (!throttled) this.database.upsertMetadata(throttleKey, JSON.stringify({ fingerprint, emittedAt: now.toISOString() }));
     const degraded = query.refreshRequested === true && query.daemonAvailable !== true;
     const warnings = degraded ? ['daemon refresh unavailable; digest was computed from durable local events'] : [];
-    return { generatedAt: now.toISOString(), window: stats.window, scope: stats.scope, findings: throttled ? [] : findings, stats, throttled, degraded, warnings };
+    return { generatedAt: now.toISOString(), window: stats.window, scope: stats.scope, findings: throttled ? [] : findings, stats, learning, throttled, degraded, warnings };
+  }
+
+  async learningEffectiveness(query: MetricsQuery = {}): Promise<LearningEffectivenessReport> {
+    const window = this.window(query);
+    const candidates = new DatabaseCandidateRepository(this.database).list().filter((candidate) => inWindow(candidate.createdAt ?? '', window));
+    const decisions = new Map<string, { created: number; accepted: number; rejected: number; pending: number }>();
+    for (const candidate of candidates) {
+      const mode = candidate.model?.mode ?? 'deterministic';
+      const bucket = decisions.get(mode) ?? { created: 0, accepted: 0, rejected: 0, pending: 0 };
+      bucket.created += 1;
+      if (candidate.decision === 'accepted') bucket.accepted += 1;
+      else if (candidate.decision === 'rejected') bucket.rejected += 1;
+      else bucket.pending += 1;
+      decisions.set(mode, bucket);
+    }
+    const accepted = [...decisions.values()].reduce((sum, bucket) => sum + bucket.accepted, 0);
+    const rejected = [...decisions.values()].reduce((sum, bucket) => sum + bucket.rejected, 0);
+    const pending = [...decisions.values()].reduce((sum, bucket) => sum + bucket.pending, 0);
+    const auditEvents = await new SqliteAuditLog(this.database).list();
+    const auditInWindow = auditEvents.filter((event) => inWindow(event.occurredAt, window));
+    return {
+      window,
+      candidates: {
+        accepted,
+        rejected,
+        pending,
+        total: candidates.length,
+      },
+      byMode: [...decisions.entries()].map(([mode, bucket]) => ({
+        mode,
+        created: bucket.created,
+        accepted: bucket.accepted,
+        acceptRate: bucket.accepted + bucket.rejected > 0 ? bucket.accepted / (bucket.accepted + bucket.rejected) : 0,
+      })),
+      learnRuns: auditInWindow.filter((event) => event.eventType === 'learn.completed').length,
+      llmShadowComparisons: auditInWindow.filter((event) => event.eventType === 'distill.llm_shadow').length,
+      llmFallbacks: auditInWindow.filter((event) => event.eventType === 'distill.llm_fallback').length,
+    };
   }
 
   private manualEvents(): OutcomeEvent[] {

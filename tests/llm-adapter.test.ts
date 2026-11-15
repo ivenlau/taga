@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { InMemoryAuditLog, llmConfigFromEnv, type LlmConfig } from '../packages/application/src/index.js';
 import {
   FetchOpenAiCompatibleProvider,
+  buildDistillerChain,
   createLlmProvider,
   type DistillationInput,
   type StructuredCompletionProvider,
 } from '../packages/distillation/src/index.js';
-import { buildDistillerChain } from '../apps/daemon/src/llm-chain.js';
 import { normalizeEvidence } from '../packages/redaction/src/index.js';
 import type { Observation } from '../packages/domain/src/index.js';
 

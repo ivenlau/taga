@@ -9,6 +9,7 @@ export interface ConsolidationLlmConfig {
   readonly apiKey?: string;
   readonly model: string;
   readonly timeoutMs: number;
+  readonly dailyCap?: number;
 }
 
 export interface ConsolidationConfig {
@@ -41,6 +42,7 @@ function consolidationLlmConfigFromEnv(env: NodeJS.ProcessEnv): ConsolidationLlm
     ...(config.apiKey === undefined ? {} : { apiKey: config.apiKey }),
     model: config.model,
     timeoutMs: config.timeoutMs,
+    ...(config.dailyCap === undefined ? {} : { dailyCap: config.dailyCap }),
   };
 }
 
