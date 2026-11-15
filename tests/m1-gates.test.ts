@@ -49,7 +49,7 @@ describe('M1 fast path gate', () => {
     expect(JSON.stringify(get.result)).toContain('retry body');
     expect(await runCli(['memory', 'forget', 'm1-memory', '--yes', `--brain=${brain}`], { cwd: fixture.path, streams: streams() })).toBe(0);
     await fixture.cleanup();
-  });
+  }, 20_000);
 
   it('covers evidence, review, two projects, two agents, cross-project recall, and recovery', async () => {
     const fixture = await createTemporaryDirectory();

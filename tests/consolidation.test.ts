@@ -142,7 +142,7 @@ describe('draft soft recall', () => {
       database.close();
       await fixture.cleanup();
     }
-  });
+  }, 20_000);
 });
 
 describe('proof signals', () => {

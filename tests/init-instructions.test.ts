@@ -122,6 +122,9 @@ describe('init agent instructions', () => {
     expect(DEFAULT_AGENT_INSTRUCTIONS).toContain('memory_record');
     expect(DEFAULT_AGENT_INSTRUCTIONS).toContain('memory_search');
     expect(DEFAULT_AGENT_INSTRUCTIONS).toContain('"draft"');
+    for (const memoryType of ['preferences', 'environment', 'procedures', 'lessons', 'projects']) {
+      expect(DEFAULT_AGENT_INSTRUCTIONS).toContain(`\`${memoryType}\` —`);
+    }
     expect(DEFAULT_AGENT_INSTRUCTIONS).not.toMatch(/taga:(instructions:)?(begin|end)/u);
   });
 });

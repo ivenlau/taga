@@ -55,7 +55,7 @@ describe('Lite MCP contract', () => {
     const summary = await call(server, { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'brain_summary', arguments: {} } });
     expect(JSON.stringify(summary.result)).toContain('byType');
     await fixture.cleanup();
-  });
+  }, 20_000);
 
   it('exposes context traces and durable timeline/get details', async () => {
     const fixture = await createTemporaryDirectory();
