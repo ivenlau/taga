@@ -21,7 +21,7 @@ describe('taga CLI', () => {
 
     const applied = streams();
     expect(await runCli(['init', '--yes', '--json', `--brain=${join(fixture.path, 'brain')}`], { cwd: fixture.path, streams: applied })).toBe(0);
-    expect(await readFile(join(fixture.path, 'brain', '_config.yaml'), 'utf8')).toContain('schemaVersion: 1');
+    expect(await readFile(join(fixture.path, 'brain', '_config.yaml'), 'utf8')).toContain('schemaVersion: 2');
     expect(await runCli(['init', '--yes', '--json', `--brain=${join(fixture.path, 'brain')}`], { cwd: fixture.path, streams: streams() })).toBe(0);
     await fixture.cleanup();
   });

@@ -65,7 +65,11 @@ pnpm install --frozen-lockfile
 pnpm run build
 ```
 
-当前仓库没有发布全局 npm 包。开发时直接运行编译后的入口：
+发布：`pnpm run build && pnpm run release:tag`（打 tag 触发 release 工作流：build + test + 发布 `taga` 包到 npm）。本地组装发布包：`pnpm run release:package`（生成 `npm-package/`，`npm publish ./npm-package --access public` 手动发布）。发布需要 GitHub 仓库配置 `NPM_TOKEN` secret。
+
+安装（发布后）：`npm i -g taga` 提供 `taga` 与 `taga-mcp` 两个命令。
+
+开发时直接运行编译后的入口：
 
 ```bash
 node dist/apps/cli/src/main.js doctor --json
@@ -162,6 +166,26 @@ TAGA_LLM_TIMEOUT_MS=3000
 ### Draft 软召回
 
 MCP `memory_search` 支持显式 `include_draft: true`（CLI 为 `memory search --include-draft`），draft 结果以 `status:draft:unverified` 标记并降权 0.5。默认召回与静态 Context Pack 仍仅包含 active 记忆。搜索结果的 `proof` 字段与 `proof:useful:N` / `proof:verified` match-reason 标记展示每条记忆的反馈佐证，供调用方自行加权。
+
+## 配置文件
+
+`~/.taga/brain/_config.yaml`（schemaVersion 2）保存除密钥外的全部行为配置，优先级为 **环境变量 > 配置文件 > 默认值**：
+
+```yaml
+schemaVersion: 2
+brainPath: C:\Users\123\.taga\brain
+projectPath: D:\codebase\taga
+projectId: project-23b3c0a76f1208b5
+agents: []
+remoteModelAllowed: false
+semantic:      { mode: on, modelPath: D:\cache\huggingface\transformers\Xenova\bge-m3, rerankMode: off }
+consolidation: { mode: on, minUsefulCount: 2, maxNotUsefulCount: 2, rejectSimilarity: 0.95, mergeSimilarity: 0.88, scanIntervalMs: 600000 }
+learn:         { allowNetwork: false }
+reflect:       { mode: on, intervalMs: 604800000, windowDays: 7, minGroupSize: 3, maxGroups: 5 }
+llm:           { mode: shadow, endpoint: http://127.0.0.1:11434/v1/chat/completions, model: MiniMax-M3, timeoutMs: 30000, providerName: openai-compatible, dailyCap: 100 }
+```
+
+配置文件经 zod schema 校验：未知键忽略并警告，v1 旧文件自动兼容升级，非法文件回退默认值并给出原因。API Key 建议用环境变量 `TAGA_LLM_API_KEY`；init 引导模式（有终端且未加 `--yes` 时自动进入）也可写入配置文件。
 
 ## 用户指定知识学习（`taga learn`）
 

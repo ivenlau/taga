@@ -30,6 +30,7 @@ export interface LearnInput {
 
 export interface LearnOptions {
   readonly brainPath: string;
+  readonly semantic?: { readonly modelPath?: string | undefined } | undefined;
   readonly audit?: AuditLog;
   readonly llm?: LlmConfig;
   readonly provider?: StructuredCompletionProvider;
@@ -57,9 +58,10 @@ const DEFAULT_MAX_FILE_BYTES = 512 * 1024;
 
 export function createSemanticDuplicateChecker(
   brainPath: string,
-  threshold = 0.95,
+  options: { readonly threshold?: number; readonly modelPath?: string | undefined } = {},
 ): SemanticDuplicateChecker | undefined {
-  const modelPath = process.env.TAGA_BGE_M3_MODEL_PATH;
+  const threshold = options.threshold ?? 0.95;
+  const modelPath = options.modelPath ?? process.env.TAGA_BGE_M3_MODEL_PATH;
   if (modelPath === undefined || modelPath.length === 0) return undefined;
   const index = new ZvecMemoryIndex(join(brainPath, '.taga', 'semantic'));
   const embedder = createLocalBgeM3Embedder({ modelPath, batchSize: 4 });
@@ -108,7 +110,7 @@ export async function runLearn(input: LearnInput, options: LearnOptions): Promis
   if (state.truncated) errors.push(`block cap ${maxBlocks} reached; narrow the source or raise the limit`);
 
   const database = new DatabaseStore(join(options.brainPath, 'taga.db'));
-  const checker = createSemanticDuplicateChecker(options.brainPath, options.duplicateThreshold ?? 0.95);
+  const checker = createSemanticDuplicateChecker(options.brainPath, { threshold: options.duplicateThreshold ?? 0.95, modelPath: options.semantic?.modelPath });
   const chain = buildDistillerChain({
     ...(options.audit === undefined ? {} : { audit: options.audit }),
     ...(options.llm === undefined ? {} : { llm: options.llm }),
@@ -505,6 +507,7 @@ export {
   REFLECT_JOB_KIND,
   enqueueScheduledReflectScan,
   reflectConfigFromEnv,
+  resolveReflectConfig,
   runReflect,
 } from './reflect.js';
-export type { ReflectConfig, ReflectGroupReport, ReflectInput, ReflectReport, ReflectRunOptions } from './reflect.js';
+export type { ReflectConfig, ReflectFileSection, ReflectGroupReport, ReflectInput, ReflectReport, ReflectRunOptions } from './reflect.js';

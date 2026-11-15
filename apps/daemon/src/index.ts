@@ -5,10 +5,11 @@ import { AgentAdapterRegistry } from '../../../packages/adapters/src/index.js';
 import { DatabaseStore } from '../../../packages/storage/src/index.js';
 import {
   SqliteAuditLog,
-  consolidationConfigFromEnv,
   enqueueScheduledConsolidationScan,
+  readValidatedConfigFile,
+  resolveConsolidationConfig,
 } from '../../../packages/application/src/index.js';
-import { enqueueScheduledReflectScan, reflectConfigFromEnv } from '../../../packages/learning/src/index.js';
+import { enqueueScheduledReflectScan, resolveReflectConfig } from '../../../packages/learning/src/index.js';
 import { AgentIngestionService, AutomaticSourceRuntime } from './ingestion.js';
 import { AgentAcceptanceService } from './acceptance.js';
 import {
@@ -27,6 +28,7 @@ export async function createDefaultDaemonRuntime(brainPath: string): Promise<Dae
   const database = new DatabaseStore(join(brainPath, 'taga.db'));
   const registry = new AgentAdapterRegistry();
   const configuredAgents = await configuredAgentIds(brainPath);
+  const fileConfig = (await readValidatedConfigFile(join(brainPath, '_config.yaml'))).config;
   const ingestion = new AgentIngestionService(database, registry);
   const sourceRuntime = new AutomaticSourceRuntime(database, ingestion, { audit: new SqliteAuditLog(database) });
   const options: DaemonRuntimeOptions = {
@@ -34,7 +36,7 @@ export async function createDefaultDaemonRuntime(brainPath: string): Promise<Dae
     database,
     closeDatabaseOnExit: true,
     handlers: new Map([
-      ...defaultJobHandlers(brainPath, database),
+      ...defaultJobHandlers(brainPath, database, fileConfig ?? undefined),
       ['source.ingest', async (job) => { await sourceRuntime.handle(job); }],
     ]),
     watchers: [
@@ -47,14 +49,14 @@ export async function createDefaultDaemonRuntime(brainPath: string): Promise<Dae
       {
         id: 'consolidation-scheduler',
         run(): Promise<void> {
-          enqueueScheduledConsolidationScan(database, consolidationConfigFromEnv(), new Date());
+          enqueueScheduledConsolidationScan(database, resolveConsolidationConfig(process.env, fileConfig?.consolidation), new Date());
           return Promise.resolve();
         },
       },
       {
         id: 'reflect-scheduler',
         run(): Promise<void> {
-          enqueueScheduledReflectScan(database, reflectConfigFromEnv(), new Date());
+          enqueueScheduledReflectScan(database, resolveReflectConfig(process.env, fileConfig?.reflect), new Date());
           return Promise.resolve();
         },
       },

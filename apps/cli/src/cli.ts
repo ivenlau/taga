@@ -5,13 +5,17 @@ import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { stringify as stringifyYaml } from 'yaml';
 import {
   DEFAULT_PROACTIVE_POLICY,
   GovernanceService,
   SqliteAuditLog,
+  parseValidatedConfigFile,
+  readValidatedConfigFile,
+  resolveSemanticConfig,
   type LifecycleActor,
 } from '../../../packages/application/src/index.js';
+import type { ConfigFileV2 } from '../../../packages/application/src/index.js';
 import { ContextPackBuilder } from '../../../packages/context/src/index.js';
 import { BrainBrowser } from '../../../packages/browsing/src/index.js';
 import { DevelopmentEvidenceService } from '../../../packages/development/src/index.js';
@@ -125,14 +129,7 @@ interface CliContext {
   readonly options: ReadonlyMap<string, string | true>;
 }
 
-interface ConfigFile {
-  readonly schemaVersion: 1;
-  readonly brainPath: string;
-  readonly projectPath: string;
-  readonly projectId: string;
-  readonly agents: readonly { id: string; kind: string; configPath: string; targetPath: string; targetPaths?: readonly string[] }[];
-  readonly remoteModelAllowed: false;
-}
+type ConfigFile = ConfigFileV2;
 
 class CliFailure extends Error {
   constructor(
@@ -239,7 +236,82 @@ async function dispatch(args: ParsedArgs, context: CliContext): Promise<CliRespo
   }
 }
 
+const isInteractiveTerminal = (): boolean => process.stdout.isTTY === true && process.stdin.isTTY === true;
+
+async function promptValue(question: string, defaultValue?: string): Promise<string> {
+  const { createInterface } = await import('node:readline');
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const suffix = defaultValue !== undefined && defaultValue.length > 0 ? ` [${defaultValue}]` : '';
+  const answer = await new Promise<string>((resolve) => rl.question(`${question}${suffix}: `, resolve));
+  rl.close();
+  const trimmed = answer.trim();
+  return trimmed.length === 0 && defaultValue !== undefined ? defaultValue : trimmed;
+}
+
+async function promptConfirm(question: string, defaultYes: boolean): Promise<boolean> {
+  const { createInterface } = await import('node:readline');
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await new Promise<string>((resolve) => rl.question(`${question} [${defaultYes ? 'Y/n' : 'y/N'}]: `, resolve));
+  rl.close();
+  const trimmed = answer.trim().toLowerCase();
+  if (trimmed.length === 0) return defaultYes;
+  return trimmed === 'y' || trimmed === 'yes' || trimmed === '是';
+}
+
 async function initCommand(context: CliContext): Promise<CliResponse> {
+  const options = new Map<string, string | true>(context.options);
+  const interactive = isInteractiveTerminal()
+    && context.options.get('yes') !== true
+    && context.options.get('no-interactive') !== true;
+  if (interactive) {
+    process.stdout.write('\n== Taga 引导式配置 ==（回车保留默认值；API Key 将写入 brain 配置文件，也可稍后改用 TAGA_LLM_API_KEY 环境变量）\n');
+    const brainAnswer = await promptValue('Brain 数据目录', context.brainPath);
+    const agentsAnswer = await promptValue('注册哪些 agent 适配器（逗号分隔：claude-code,codex,pi,opencode,cursor,windsurf,cline,roo,local）', 'claude-code,codex');
+    const semanticOn = await promptConfirm('启用本地语义检索（BGE-M3）', true);
+    let semanticModelPath: string | undefined;
+    if (semanticOn) semanticModelPath = await promptValue('BGE-M3 模型目录', process.env.TAGA_BGE_M3_MODEL_PATH ?? '');
+    const llmMode = await promptValue('LLM 模式（off/shadow/on，蒸馏与反思质量取决于此）', 'off');
+    let llmEndpoint: string | undefined;
+    let llmModel: string | undefined;
+    let llmApiKey: string | undefined;
+    let llmDailyCap: number | undefined;
+    if (llmMode !== 'off') {
+      llmEndpoint = await promptValue('LLM 端点（OpenAI 兼容 chat/completions 地址）', 'http://127.0.0.1:11434/v1/chat/completions');
+      llmModel = await promptValue('LLM 模型名', 'MiniMax-M3');
+      llmApiKey = await promptValue('LLM API Key（回车跳过则稍后用 TAGA_LLM_API_KEY 环境变量设置）', '');
+      const capAnswer = await promptValue('每日 LLM 调用上限（回车=不限制）', '');
+      const capParsed = Number(capAnswer);
+      if (Number.isInteger(capParsed) && capParsed > 0) llmDailyCap = capParsed;
+    }
+    const consolidationOn = await promptConfirm('启用后台整合与自动晋升', true);
+    const reflectOn = await promptConfirm('启用周期反思（每周提炼高层洞察）', consolidationOn && llmMode !== 'off');
+    const learnNetwork = await promptConfirm('允许 learn --url 抓取网页内容', false);
+    options.set('agent', agentsAnswer);
+    options.set('semantic-file-mode', semanticOn ? 'on' : 'off');
+    if (semanticOn && semanticModelPath !== undefined && semanticModelPath.length > 0) options.set('semantic-file-model-path', semanticModelPath);
+    options.set('llm-file-mode', llmMode);
+    if (llmMode !== 'off') {
+      if (llmEndpoint !== undefined) options.set('llm-file-endpoint', llmEndpoint);
+      if (llmModel !== undefined) options.set('llm-file-model', llmModel);
+      if (llmApiKey !== undefined && llmApiKey.length > 0) options.set('llm-file-api-key', llmApiKey);
+      if (llmDailyCap !== undefined) options.set('llm-file-daily-cap', String(llmDailyCap));
+    }
+    options.set('consolidation-file-mode', consolidationOn ? 'on' : 'off');
+    options.set('reflect-file-mode', reflectOn ? 'on' : 'off');
+    options.set('learn-file-allow-network', learnNetwork ? 'true' : 'false');
+    if (brainAnswer !== context.brainPath) {
+      const resolvedBrain = resolve(context.cwd, brainAnswer);
+      const options = new Map<string, string | true>(context.options);
+      options.set('no-interactive', true);
+      return initCommand({
+        ...context,
+        brainPath: resolvedBrain,
+        configPath: join(resolvedBrain, '_config.yaml'),
+        databasePath: join(resolvedBrain, 'taga.db'),
+        options,
+      });
+    }
+  }
   const projectPath = resolve(context.cwd, optionString(context.options, 'project') ?? context.cwd);
   const projectId = await projectIdentity(projectPath);
   const registry = new AgentAdapterRegistry();
@@ -257,13 +329,41 @@ async function initCommand(context: CliContext): Promise<CliResponse> {
       targetPaths,
     };
   });
+  const semanticFileMode = optionString(context.options, 'semantic-file-mode');
+  const semanticFileModelPath = optionString(context.options, 'semantic-file-model-path');
+  const llmFileMode = optionString(context.options, 'llm-file-mode');
+  const llmFileEndpoint = optionString(context.options, 'llm-file-endpoint');
+  const llmFileModel = optionString(context.options, 'llm-file-model');
+  const llmFileApiKey = optionString(context.options, 'llm-file-api-key');
+  const llmFileDailyCap = numberOption(context.options, 'llm-file-daily-cap');
+  const consolidationFileMode = optionString(context.options, 'consolidation-file-mode');
+  const reflectFileMode = optionString(context.options, 'reflect-file-mode');
+  const learnFileAllowNetwork = optionString(context.options, 'learn-file-allow-network');
   const config: ConfigFile = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     brainPath: context.brainPath,
     projectPath,
     projectId,
     agents,
     remoteModelAllowed: false,
+    ...(semanticFileMode === undefined ? {} : {
+      semantic: {
+        mode: semanticFileMode as 'off' | 'shadow' | 'on',
+        ...(semanticFileModelPath === undefined ? {} : { modelPath: semanticFileModelPath }),
+      },
+    }),
+    ...(consolidationFileMode === undefined ? {} : { consolidation: { mode: consolidationFileMode as 'on' | 'off' } }),
+    ...(reflectFileMode === undefined ? {} : { reflect: { mode: reflectFileMode as 'on' | 'off' } }),
+    ...(learnFileAllowNetwork === undefined ? {} : { learn: { allowNetwork: learnFileAllowNetwork === 'true' } }),
+    ...(llmFileMode === undefined ? {} : {
+      llm: {
+        mode: llmFileMode as 'off' | 'shadow' | 'on',
+        ...(llmFileEndpoint === undefined ? {} : { endpoint: llmFileEndpoint }),
+        ...(llmFileModel === undefined ? {} : { model: llmFileModel }),
+        ...(llmFileApiKey === undefined ? {} : { apiKey: llmFileApiKey }),
+        ...(llmFileDailyCap === undefined ? {} : { dailyCap: llmFileDailyCap }),
+      },
+    }),
   };
   const writeInstructions = context.options.get('no-instructions') !== true;
   const preview = {
@@ -793,7 +893,7 @@ async function memoryCommand(
         limit: numberOption(context.options, 'limit') ?? 10,
         ...(context.options.get('include-draft') === true ? { includeDraft: true } : {}),
       };
-      const mode = optionString(context.options, 'semantic-mode') ?? process.env.TAGA_SEMANTIC_MODE ?? 'off';
+      const mode = optionString(context.options, 'semantic-mode') ?? process.env.TAGA_SEMANTIC_MODE ?? (await readValidatedConfigFile(context.configPath)).config?.semantic?.mode ?? 'off';
       const semantic = mode === 'off' ? undefined : createCliSemanticRetriever(context, database);
       const lexical = provider.searchSafe(input);
       const retrieval = mode === 'off'
@@ -830,7 +930,7 @@ async function memoryCommand(
     try {
       const provider = new FtsRetrievalProvider(database);
       const query = optionString(context.options, 'query') ?? memory.title;
-      const mode = optionString(context.options, 'semantic-mode') ?? process.env.TAGA_SEMANTIC_MODE ?? 'off';
+      const mode = optionString(context.options, 'semantic-mode') ?? process.env.TAGA_SEMANTIC_MODE ?? (await readValidatedConfigFile(context.configPath)).config?.semantic?.mode ?? 'off';
       if (mode === 'off') return { ok: true, code: 'MEMORY_WHY', message: 'memory rationale loaded', data: provider.why(id, query) };
       const retrieval = await provider.searchHybrid({ query, limit: 50 }, createCliSemanticRetriever(context, database));
       return { ok: true, code: 'MEMORY_WHY', message: 'memory rationale loaded', data: retrieval.items.find((item) => item.memory.id === id)?.matchReason ?? [] };
@@ -1387,6 +1487,8 @@ async function learnCommand(context: CliContext): Promise<CliResponse> {
   const maxBlocks = numberOption(context.options, 'max-blocks');
   const intervalMs = numberOption(context.options, 'interval-ms');
   const maxCycles = numberOption(context.options, 'max-cycles');
+  const fileConfig = (await readValidatedConfigFile(context.configPath)).config;
+  const allowNetwork = context.options.get('allow-network') === true || fileConfig?.learn?.allowNetwork === true;
   await ensurePrivateDirectory(context.brainPath);
   if (context.options.get('watch') === true) {
     if (dir === undefined) throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', 'learn --watch requires --dir=<path>');
@@ -1398,9 +1500,10 @@ async function learnCommand(context: CliContext): Promise<CliResponse> {
       ...(include === undefined ? {} : { include }),
       ...(type === undefined ? {} : { type: type as MemoryType }),
       ...(project === undefined ? {} : { project }),
-      allowNetwork: context.options.get('allow-network') === true,
+      allowNetwork,
     }, {
       brainPath: context.brainPath,
+      semantic: { modelPath: resolveSemanticConfig(process.env, fileConfig?.semantic).modelPath },
       ...(intervalMs === undefined ? {} : { intervalMs }),
       ...(maxCycles === undefined ? {} : { maxCycles }),
       signal: controller.signal,
@@ -1420,9 +1523,10 @@ async function learnCommand(context: CliContext): Promise<CliResponse> {
     ...(include === undefined ? {} : { include }),
     ...(type === undefined ? {} : { type: type as MemoryType }),
     ...(project === undefined ? {} : { project }),
-    allowNetwork: context.options.get('allow-network') === true,
+    allowNetwork,
   }, {
     brainPath: context.brainPath,
+    semantic: { modelPath: resolveSemanticConfig(process.env, fileConfig?.semantic).modelPath },
     ...(maxBlocks === undefined ? {} : { maxBlocks }),
   });
   return { ok: true, code: 'LEARN_COMPLETED', message: 'learn run completed', data: report };
@@ -1478,8 +1582,7 @@ async function readMemoryBody(brainPath: string, memory: Memory): Promise<string
 
 async function readConfig(path: string): Promise<ConfigFile | null> {
   try {
-    const parsed: unknown = parseYaml(await readFile(path, 'utf8'));
-    return parsed as ConfigFile;
+    return parseValidatedConfigFile(await readFile(path, 'utf8')).config;
   } catch (error) {
     if (isMissing(error)) return null;
     throw error;

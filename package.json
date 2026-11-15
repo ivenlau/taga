@@ -12,7 +12,9 @@
     "evaluate:semantic": "node scripts/evaluate-semantic.mjs",
     "evaluate:semantic:strict": "node scripts/evaluate-semantic.mjs --suite=strict-300",
     "test": "vitest run",
-    "lint": "eslint . --max-warnings=0"
+    "lint": "eslint . --max-warnings=0",
+    "release:package": "node scripts/build-npm-package.mjs",
+    "release:tag": "node scripts/tag-release.mjs"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
@@ -26,14 +28,28 @@
     "eslint": "^9.39.1",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.46.3",
-    "vitest": "^4.0.8"
+    "vitest": "^4.0.8",
+    "@types/better-sqlite3": "^7.6.13"
   },
   "dependencies": {
     "@huggingface/transformers": "4.3.2",
-    "@types/better-sqlite3": "^7.6.13",
     "@zvec/zvec": "0.8.0",
     "better-sqlite3": "^12.11.1",
     "yaml": "^2.9.1",
     "zod": "^4.6.7"
-  }
+  },
+  "description": "Taga - local-first, auditable long-term memory framework for AI agents.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ivenlau/taga.git"
+  },
+  "keywords": [
+    "ai-agents",
+    "memory",
+    "long-term-memory",
+    "mcp",
+    "rag",
+    "local-first"
+  ]
 }

@@ -11,6 +11,14 @@ import {
 import { DatabaseStore, MarkdownMemoryRepository } from '../../storage/src/index.js';
 import { GardenService } from '../../garden/src/index.js';
 
+export interface ReflectFileSection {
+  readonly mode?: 'off' | 'on' | undefined;
+  readonly intervalMs?: number | undefined;
+  readonly windowDays?: number | undefined;
+  readonly minGroupSize?: number | undefined;
+  readonly maxGroups?: number | undefined;
+}
+
 export interface ReflectConfig {
   readonly mode: 'off' | 'on';
   readonly intervalMs: number;
@@ -19,15 +27,20 @@ export interface ReflectConfig {
   readonly maxGroups: number;
 }
 
-export function reflectConfigFromEnv(env: NodeJS.ProcessEnv = process.env): ReflectConfig {
-  const mode = env.TAGA_REFLECT_MODE === 'on' ? 'on' : 'off';
+export function resolveReflectConfig(env: NodeJS.ProcessEnv = process.env, file?: ReflectFileSection): ReflectConfig {
+  const envMode = env.TAGA_REFLECT_MODE === 'on' ? 'on' : env.TAGA_REFLECT_MODE === 'off' ? 'off' : undefined;
   return {
-    mode,
-    intervalMs: positiveInt(env.TAGA_REFLECT_INTERVAL_MS, 7 * 24 * 60 * 60 * 1000),
-    windowDays: positiveInt(env.TAGA_REFLECT_WINDOW_DAYS, 7),
-    minGroupSize: positiveInt(env.TAGA_REFLECT_MIN_GROUP, 3),
-    maxGroups: positiveInt(env.TAGA_REFLECT_MAX_GROUPS, 5),
+    mode: envMode ?? file?.mode ?? 'off',
+    intervalMs: positiveInt(env.TAGA_REFLECT_INTERVAL_MS, file?.intervalMs ?? 7 * 24 * 60 * 60 * 1000),
+    windowDays: positiveInt(env.TAGA_REFLECT_WINDOW_DAYS, file?.windowDays ?? 7),
+    minGroupSize: positiveInt(env.TAGA_REFLECT_MIN_GROUP, file?.minGroupSize ?? 3),
+    maxGroups: positiveInt(env.TAGA_REFLECT_MAX_GROUPS, file?.maxGroups ?? 5),
   };
+}
+
+/** Back-compat alias: env-only resolution. */
+export function reflectConfigFromEnv(env: NodeJS.ProcessEnv = process.env): ReflectConfig {
+  return resolveReflectConfig(env);
 }
 
 export interface ReflectInput {

@@ -8,16 +8,21 @@ export {
   scopeWeight,
 } from './governance.js';
 export { SqliteAuditLog } from './sqlite-audit.js';
-export { llmConfigFromEnv } from './llm.js';
-export type { LlmConfig, LlmMode } from './llm.js';
+export { llmConfigFromEnv, resolveLlmConfig } from './llm.js';
+export type { LlmConfig, LlmFileSection, LlmMode } from './llm.js';
+export { resolveSemanticConfig } from './semantic-config.js';
+export type { SemanticConfig, SemanticFileSection, SemanticMode } from './semantic-config.js';
+export { parseValidatedConfigFile, readValidatedConfigFile } from './config-file.js';
+export type { ConfigFileV2, ValidatedConfigFile } from './config-file.js';
 export {
   CONSOLIDATION_JOB_KIND,
   consolidationConfigFromEnv,
   consolidationPolicy,
   enqueueConsolidationScan,
   enqueueScheduledConsolidationScan,
+  resolveConsolidationConfig,
 } from './consolidation.js';
-export type { ConsolidationConfig, ConsolidationLlmConfig } from './consolidation.js';
+export type { ConsolidationConfig, ConsolidationFileSection, ConsolidationLlmConfig } from './consolidation.js';
 export {
   DEFAULT_PROACTIVE_POLICY,
   ProactivePolicyService,

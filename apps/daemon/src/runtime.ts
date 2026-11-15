@@ -12,7 +12,7 @@ import {
   type LearnInput,
 } from '../../../packages/learning/src/index.js';
 import { MetricsService } from '../../../packages/metrics/src/index.js';
-import { SqliteAuditLog, llmConfigFromEnv } from '../../../packages/application/src/index.js';
+import { SqliteAuditLog, resolveLlmConfig, resolveSemanticConfig, type ConfigFileV2 } from '../../../packages/application/src/index.js';
 import { AutomaticDistillationService } from '../../../packages/distillation/src/index.js';
 import { NotificationService } from '../../../packages/notifications/src/index.js';
 import { MarkdownMemoryRepository } from '../../../packages/storage/src/index.js';
@@ -179,10 +179,11 @@ export class DaemonRuntime {
   }
 }
 
-export function defaultJobHandlers(brainPath: string, database: DatabaseStore): ReadonlyMap<string, DaemonJobHandler> {
+export function defaultJobHandlers(brainPath: string, database: DatabaseStore, file?: ConfigFileV2): ReadonlyMap<string, DaemonJobHandler> {
   const audit = new SqliteAuditLog(database);
   const notifications = new NotificationService(database, audit);
-  const duplicateChecker = createSemanticDuplicateChecker(brainPath);
+  const semantic = resolveSemanticConfig(process.env, file?.semantic);
+  const duplicateChecker = createSemanticDuplicateChecker(brainPath, { modelPath: semantic.modelPath });
   return new Map<string, DaemonJobHandler>([
     ...semanticJobHandlers(brainPath, database),
     ...consolidationJobHandlers(brainPath, database, { notifications }),
@@ -203,7 +204,7 @@ export function defaultJobHandlers(brainPath: string, database: DatabaseStore): 
       }, { brainPath, audit });
     }],
     [REFLECT_JOB_KIND, async () => {
-      const report = await runReflect({}, { brainPath, audit, llm: llmConfigFromEnv() });
+      const report = await runReflect({}, { brainPath, audit, llm: resolveLlmConfig(process.env, file?.llm) });
       if (report.candidates > 0) {
         await notifications.enqueue({
           level: 'L1',
@@ -240,7 +241,7 @@ export function defaultJobHandlers(brainPath: string, database: DatabaseStore): 
       const payload = JSON.parse(job.payload) as { projectId?: string; sessionId?: string };
       await new AutomaticDistillationService(
         database,
-        buildDistillerChain({ audit }),
+        buildDistillerChain({ audit, llm: resolveLlmConfig(process.env, file?.llm) }),
         undefined,
         {
           audit,
