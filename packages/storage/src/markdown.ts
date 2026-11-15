@@ -43,20 +43,21 @@ export class BrainLayout {
 }
 
 export function parseMarkdownDocument(content: string): ParsedMarkdownDocument {
-  if (!content.startsWith('---\n')) {
+  const normalized = content.replace(/\r\n/gu, '\n');
+  if (!normalized.startsWith('---\n')) {
     throw new TagaError(errorCodes.validationFailed, 'markdown frontmatter is missing');
   }
-  const closingOffset = content.indexOf('\n---\n', 4);
+  const closingOffset = normalized.indexOf('\n---\n', 4);
   if (closingOffset < 0) {
     throw new TagaError(errorCodes.validationFailed, 'markdown frontmatter is not closed');
   }
-  const frontmatter: unknown = parseYaml(content.slice(4, closingOffset)) as unknown;
+  const frontmatter: unknown = parseYaml(normalized.slice(4, closingOffset)) as unknown;
   if (frontmatter === null || typeof frontmatter !== 'object' || Array.isArray(frontmatter)) {
     throw new TagaError(errorCodes.validationFailed, 'markdown frontmatter must be an object');
   }
   return {
     frontmatter: frontmatter as Record<string, unknown>,
-    body: content.slice(closingOffset + '\n---\n'.length),
+    body: normalized.slice(closingOffset + '\n---\n'.length),
   };
 }
 

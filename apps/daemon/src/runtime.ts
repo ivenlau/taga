@@ -203,7 +203,19 @@ export function defaultJobHandlers(brainPath: string, database: DatabaseStore): 
       }, { brainPath, audit });
     }],
     [REFLECT_JOB_KIND, async () => {
-      await runReflect({}, { brainPath, audit, llm: llmConfigFromEnv() });
+      const report = await runReflect({}, { brainPath, audit, llm: llmConfigFromEnv() });
+      if (report.candidates > 0) {
+        await notifications.enqueue({
+          level: 'L1',
+          kind: 'candidate',
+          subjectType: 'reflect',
+          subjectId: `reflect-${new Date().toISOString().slice(0, 10)}`,
+          title: 'Reflect insights created',
+          message: `${report.candidates} insight candidate(s) distilled from ${report.groupsReflected} memory group(s); garden proposals filed for possible consolidation.`,
+          source: 'reflect.run',
+          dedupeKey: `reflect:${new Date().toISOString().slice(0, 10)}`,
+        });
+      }
     }],
     ['garden.scan', async () => {
       const memories = await new MarkdownMemoryRepository(brainPath).list();

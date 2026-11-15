@@ -560,6 +560,24 @@ export class ReviewService {
     return this.candidates.list().filter((candidate) => candidate.decision === 'pending');
   }
 
+  async reject(id: string, actor: LifecycleActor, reason: string): Promise<Candidate> {
+    const candidate = this.require(id);
+    if (candidate.decision !== 'pending') throw new Error(`candidate is already ${candidate.decision}`);
+    const updated = parseCandidate({ ...candidate, decision: 'rejected', decidedAt: this.clock().toISOString() });
+    this.candidates.save(updated);
+    await this.audit.append({
+      eventType: 'candidate.rejected',
+      actor: actor.actor,
+      ...(actor.actorId === undefined ? {} : { actorId: actor.actorId }),
+      subjectType: 'candidate',
+      subjectId: id,
+      occurredAt: this.clock().toISOString(),
+      reason,
+      payload: { title: candidate.title, memoryType: candidate.memoryType },
+    });
+    return updated;
+  }
+
   async accept(id: string, actor: LifecycleActor, reason: string): Promise<Memory> {
     const candidate = this.require(id);
     const now = this.clock().toISOString();
@@ -593,13 +611,6 @@ export class ReviewService {
     await governance.create(memory, actor, reason);
     this.candidates.save({ ...candidate, decision: 'accepted', decidedAt: this.clock().toISOString() });
     return memory;
-  }
-
-  reject(id: string): Candidate {
-    const candidate = this.require(id);
-    const updated = { ...candidate, decision: 'rejected' as const, decidedAt: this.clock().toISOString() };
-    this.candidates.save(updated);
-    return updated;
   }
 
   merge(id: string, replacementId: string): Candidate {

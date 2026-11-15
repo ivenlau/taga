@@ -9,6 +9,7 @@ import {
   type StructuredCompletionProvider,
 } from '../../distillation/src/index.js';
 import { DatabaseStore, MarkdownMemoryRepository } from '../../storage/src/index.js';
+import { GardenService } from '../../garden/src/index.js';
 
 export interface ReflectConfig {
   readonly mode: 'off' | 'on';
@@ -101,6 +102,7 @@ export async function runReflect(input: ReflectInput, options: ReflectRunOptions
   });
   const database = new DatabaseStore(join(options.brainPath, 'taga.db'));
   const candidatesRepo = new DatabaseCandidateRepository(database);
+  const garden = new GardenService(database);
   const groupReports: ReflectGroupReport[] = [];
   let candidatesCreated = 0;
   let reflected = 0;
@@ -112,6 +114,7 @@ export async function runReflect(input: ReflectInput, options: ReflectRunOptions
       if (insightCandidate !== null) {
         candidatesCreated += 1;
         reflected += 1;
+        fileRedundancyProposal(garden, group, insightCandidate.id, clock);
       }
     } catch (error) {
       errors.push(`reflect group ${group.key} failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -228,5 +231,26 @@ function positiveInt(value: string | undefined, fallback: number): number {
   if (value === undefined || value.length === 0) return fallback;
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 && Number.isInteger(parsed) ? parsed : fallback;
+}
+
+function fileRedundancyProposal(garden: GardenService, group: MemoryGroup, insightCandidateId: string, clock: () => Date): void {
+  try {
+    garden.recordProposal({
+      category: 'duplicate',
+      affectedIds: group.members.map((memory) => memory.id),
+      evidence: {
+        memoryIds: group.members.map((memory) => memory.id),
+        contentHashes: group.members.map((memory) => memory.contentHash),
+        sourceCount: group.members.reduce((count, memory) => count + memory.sources.length, 0),
+      },
+      score: 1,
+      threshold: 1,
+      reason: `reflect insight ${insightCandidateId} covers ${group.members.length} same-theme memories; consider consolidating them`,
+      suggestedAction: 'review_duplicate',
+    });
+  } catch {
+    // proposal filing is best-effort; the audit trail already records the group
+  }
+  void clock;
 }
 

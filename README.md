@@ -194,8 +194,9 @@ TAGA_REFLECT_MIN_GROUP=3
 TAGA_REFLECT_MAX_GROUPS=5
 ```
 
-反思需要 LLM（`TAGA_LLM_MODE=on`）：每次反思产生 1 条洞察 candidate + `reflect.completed`/`reflect.group` 审计事件。冗余合并建议先通过审计与通知提示，机制化的 garden supersede 提案规划在后续版本。
+反思需要 LLM（`TAGA_LLM_MODE=on`）：每次反思产生 1 条洞察 candidate、1 条冗余合并 garden 提案 + `reflect.completed`/`reflect.group` 审计事件和 L1 通知。Markdown 解析对 CRLF 行尾容错（外部编辑器改过的记忆文件不再被静默忽略）。
 - **纠错学习**：`memory_feedback kind=conflict` 会自动触发一次以冲突上下文为证据的蒸馏（原记忆哪不可靠、正确是什么），产出的修正 lessons candidate 同样进审核队列，每条记忆每天最多触发一次
+- **冗余提案**：每个反思分组会同时归档一条 garden 提案（"这 N 条记忆主题趋同，考虑合并"），与洞察 candidate 一并供人工处置
 
 ## LLM 适配（可选）
 

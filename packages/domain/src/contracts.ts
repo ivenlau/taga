@@ -332,7 +332,7 @@ export const memoryCommandSchema = z.discriminatedUnion('type', [
 export type MemoryCommand = z.infer<typeof memoryCommandSchema>;
 
 const allowedTransitions: Record<MemoryStatus, Partial<Record<MemoryCommand['type'], MemoryStatus>>> = {
-  candidate: {},
+  candidate: { activate: 'active', forget: 'forgotten' },
   draft: { activate: 'active', supersede: 'superseded', forget: 'forgotten' },
   active: { mark_stale: 'stale', supersede: 'superseded', forget: 'forgotten' },
   stale: { refresh: 'active', supersede: 'superseded', forget: 'forgotten' },

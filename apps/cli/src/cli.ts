@@ -1268,14 +1268,30 @@ async function reviewCommand(subcommand: string | undefined, positionals: readon
       database.close();
     }
   }
-  if (subcommand !== 'accept') {
+  if (subcommand !== 'accept' && subcommand !== 'reject') {
     database.close();
-    throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', 'supported review commands: ls, accept');
+    throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', 'supported review commands: ls, accept, reject');
   }
   const id = optionString(context.options, 'memory') ?? positionals[0];
   if (id === undefined) {
     database.close();
-    throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', 'review accept requires --memory=<id> or a candidate id');
+    throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', `review ${subcommand} requires --memory=<id> or a candidate id`);
+  }
+  if (subcommand === 'reject') {
+    try {
+      const audit = new SqliteAuditLog(database);
+      const candidate = database.getCandidate(id);
+      if (candidate !== null) {
+        const rejected = await new ReviewService(new DatabaseCandidateRepository(database), repository, audit).reject(id, { actor: 'user' }, 'review candidate reject from CLI');
+        return { ok: true, code: 'REVIEW_REJECTED', message: 'candidate rejected', data: rejected };
+      }
+      const updated = await new GovernanceService(repository, audit).forget(id, { actor: 'user' }, 'review reject from CLI', true);
+      new FtsRetrievalProvider(database).remove(updated.id);
+      enqueueSemanticRemove(database, updated.id);
+      return { ok: true, code: 'REVIEW_REJECTED', message: 'memory rejected and forgotten', data: updated };
+    } finally {
+      database.close();
+    }
   }
   try {
     const audit = new SqliteAuditLog(database);

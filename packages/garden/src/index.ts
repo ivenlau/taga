@@ -115,7 +115,7 @@ export class GardenService {
     const reason = input.verdict === 'duplicate'
       ? `draft is a semantic near-duplicate of an active memory (cosine ${input.score.toFixed(4)})`
       : `draft overlaps an active memory; merge review suggested (cosine ${input.score.toFixed(4)})`;
-    const candidate = proposal({
+    return this.recordProposal({
       category: 'duplicate',
       affectedIds: [input.draft.id, input.existing.id],
       evidence: evidenceFor([input.draft, input.existing]),
@@ -123,8 +123,19 @@ export class GardenService {
       threshold: input.threshold,
       reason,
       suggestedAction: 'review_duplicate',
-      now: this.clock(),
     });
+  }
+
+  recordProposal(input: {
+    readonly category: GardenCategory;
+    readonly affectedIds: readonly string[];
+    readonly evidence: GardenEvidence;
+    readonly score: number;
+    readonly threshold: number;
+    readonly reason: string;
+    readonly suggestedAction: GardenAction;
+  }): GardenProposal {
+    const candidate = proposal({ ...input, now: this.clock() });
     const current = this.get(candidate.id);
     if (current !== null) return current;
     this.database.upsertMetadata(`garden:proposal:${candidate.id}`, JSON.stringify(candidate));
