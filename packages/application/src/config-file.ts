@@ -7,7 +7,6 @@ import type { SemanticMode } from './semantic-config.js';
 export interface SemanticFileSection {
   readonly mode?: SemanticMode | undefined;
   readonly modelPath?: string | undefined;
-  readonly rerankMode?: SemanticMode | undefined;
 }
 
 export interface LlmFileSection {
@@ -67,7 +66,6 @@ export interface ConfigFileV2 {
 export const semanticSectionSchema: z.ZodType<SemanticFileSection> = z.object({
   mode: z.enum(['off', 'shadow', 'on']).optional(),
   modelPath: z.string().min(1).optional(),
-  rerankMode: z.enum(['off', 'shadow', 'on']).optional(),
 });
 
 export const llmSectionSchema: z.ZodType<LlmFileSection> = z.object({

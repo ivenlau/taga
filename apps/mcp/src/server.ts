@@ -20,10 +20,8 @@ import {
 import { ContextPackBuilder } from '../../../packages/context/src/index.js';
 import { BrainBrowser } from '../../../packages/browsing/src/index.js';
 import {
-  createLocalCrossEncoderReranker,
   FtsRetrievalProvider,
   type HybridRetrievalResult,
-  type Reranker,
   type RetrievalResult,
   type SemanticRetriever,
 } from '../../../packages/retrieval/src/index.js';
@@ -43,8 +41,6 @@ const searchInputSchema = z.object({
   k: z.number().int().positive().max(100).optional(),
   include_draft: z.boolean().default(false),
   semantic_mode: z.enum(['off', 'shadow', 'on']).optional(),
-  rerank_mode: z.enum(['off', 'shadow', 'on']).optional(),
-  rerank_top_k: z.number().int().positive().max(100).optional(),
 });
 
 const timelineInputSchema = z.object({
@@ -270,7 +266,6 @@ function toolCallResult(payload: unknown): { content: Array<{ type: 'text'; text
 export class LiteMcpServer {
   private semanticIndex: ZvecMemoryIndex | undefined;
   private semanticEmbedder: Embedder | undefined;
-  private reranker: Reranker | undefined;
 
   constructor(
     private readonly brainPath: string,
@@ -453,35 +448,24 @@ export class LiteMcpServer {
       const provider = new FtsRetrievalProvider(database);
       const catalog = new Map((await this.readMemoryFiles()).map((item) => [item.memory.id, item.memory]));
       const mode = parsed.semantic_mode ?? this.config.retrieval.semantic.mode;
-      const rerankMode = parsed.rerank_mode ?? this.config.retrieval.rerank.mode;
-      const rerankTopK = parsed.rerank_top_k ?? this.config.retrieval.rerank.topK;
       const searchInput = {
         query: parsed.query,
         ...(parsed.project_id === undefined ? {} : { scope: { kind: 'project' as const, id: parsed.project_id } }),
         ...(parsed.include_draft === true ? { includeDraft: true } : {}),
-        limit: mode === 'off' ? parsed.k ?? 5 : Math.max(parsed.k ?? 5, rerankMode === 'off' ? parsed.k ?? 5 : rerankTopK),
+        limit: parsed.k ?? 5,
       };
       const semantic = mode === 'off' ? undefined : this.semanticRetriever(database);
-      const reranker = mode === 'off' || rerankMode === 'off' ? undefined : this.crossEncoderReranker();
       const lexical = provider.searchSafe(searchInput);
       const queryId = `q-${randomUUID()}`;
       let shadowObservation: HybridRetrievalResult | undefined;
-      let rerankShadowObservation: HybridRetrievalResult | undefined;
       let retrieval: RetrievalResult | HybridRetrievalResult;
       if (mode === 'off') {
         retrieval = lexical;
       } else if (mode === 'shadow') {
         shadowObservation = await provider.searchHybrid(searchInput, semantic);
-        if (rerankMode === 'shadow' && reranker !== undefined) {
-          rerankShadowObservation = await provider.searchHybrid(searchInput, semantic, { reranker, rerankTopK });
-        }
         retrieval = { ...lexical, degraded: shadowObservation.degraded };
       } else {
-        retrieval = await provider.searchHybrid(
-          searchInput,
-          semantic,
-          reranker === undefined ? {} : { reranker, rerankTopK, rerankTimeoutMs: this.config.retrieval.rerank.timeoutMs },
-        );
+        retrieval = await provider.searchHybrid(searchInput, semantic);
       }
       const filtered = parsed.type === undefined
         ? retrieval.items
@@ -524,22 +508,6 @@ export class LiteMcpServer {
           },
         });
       }
-      if (rerankShadowObservation !== undefined) {
-        await audit.append({
-          eventType: 'memory.rerank_shadow',
-          actor: 'agent',
-          subjectType: 'search',
-          subjectId: queryId,
-          occurredAt: this.clock().toISOString(),
-          reason: 'shadow cross-encoder rerank via MCP',
-          payload: {
-            query: parsed.query,
-            fusedIds: shadowObservation?.items.map((item) => item.memory.id) ?? [],
-            rerankedIds: rerankShadowObservation.items.map((item) => item.memory.id),
-            degraded: rerankShadowObservation.rerankerDegraded ?? false,
-          },
-        });
-      }
       for (const result of results) {
         await audit.append({
           eventType: 'memory.recalled',
@@ -556,11 +524,6 @@ export class LiteMcpServer {
         data: {
           query_id: queryId,
           results,
-          reranker: {
-            mode: rerankMode,
-            available: 'rerankerAvailable' in retrieval ? retrieval.rerankerAvailable ?? false : false,
-            degraded: 'rerankerDegraded' in retrieval ? retrieval.rerankerDegraded ?? false : false,
-          },
         },
         degraded: retrieval.degraded,
         warnings: retrieval.degraded
@@ -581,16 +544,6 @@ export class LiteMcpServer {
       index: this.semanticIndex,
       embedder: this.semanticEmbedder,
     });
-  }
-
-  private crossEncoderReranker(): Reranker | undefined {
-    const modelPath = this.config.retrieval.rerank.modelPath;
-    if (modelPath.length === 0) return undefined;
-    this.reranker ??= createLocalCrossEncoderReranker({
-      modelPath,
-      ...(this.config.retrieval.rerank.modelId.length === 0 ? {} : { modelId: this.config.retrieval.rerank.modelId }),
-    });
-    return this.reranker;
   }
 
   private async timeline(input: Record<string, unknown>): Promise<unknown> {

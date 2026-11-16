@@ -874,7 +874,7 @@ export function proposeConsolidation(candidates: readonly Candidate[], now = new
   return proposals;
 }
 
-export function rerankCandidates(items: readonly CandidateRankInput[]): CandidateRankInput[] {
+export function rankCandidates(items: readonly CandidateRankInput[]): CandidateRankInput[] {
   return [...items].sort((left, right) => rankScore(right) - rankScore(left) || left.candidate.id.localeCompare(right.candidate.id));
 }
 

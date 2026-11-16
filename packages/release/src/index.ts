@@ -76,7 +76,7 @@ export const m4ReleaseGates: readonly ReleaseGateDefinition[] = [
   { id: 'atomic-facts', category: 'knowledge', description: 'Atomic facts preserve Evidence provenance and compatibility', automated: true, required: true },
   { id: 'hybrid-retrieval', category: 'performance', description: 'FTS5 and optional semantic retrieval fuse with degraded fallback', automated: true, required: true },
   { id: 'progressive-context', category: 'performance', description: 'Progressive search, timeline, and bounded detail recall pass', automated: true, required: true },
-  { id: 'consolidation-rerank', category: 'knowledge', description: 'Merge/conflict proposals preserve sources and reranking is explainable', automated: true, required: true },
+  { id: 'consolidation-ranking', category: 'knowledge', description: 'Merge/conflict proposals preserve sources and candidate ranking is explainable', automated: true, required: true },
   { id: 'm4-evaluation', category: 'performance', description: 'Sanitized M4 evaluation and cost/privacy gates pass', automated: false, required: true },
   { id: 'm4-production-rollout', category: 'scope', description: 'LLM production rollout is explicitly enabled only after shadow evidence', automated: false, required: true },
   { id: 'm4-deferred-scope', category: 'scope', description: 'Team sync, Pro backend, and non-development packs remain deferred', automated: true, required: false },

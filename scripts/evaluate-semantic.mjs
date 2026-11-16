@@ -4,16 +4,13 @@ import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createLocalBgeM3Embedder } from '../dist/packages/embedding/src/index.js';
-import { createLocalCrossEncoderReranker, FtsRetrievalProvider } from '../dist/packages/retrieval/src/index.js';
+import { FtsRetrievalProvider } from '../dist/packages/retrieval/src/index.js';
 import { ZvecMemoryIndex, ZvecSemanticRetriever } from '../dist/packages/semantic-index/src/index.js';
 import { DatabaseStore, contentHash } from '../dist/packages/storage/src/index.js';
 import { createStrictSemanticDataset } from './semantic-strict-300-fixture.mjs';
 
 const modelPath = argument('model') ?? process.env.TAGA_BGE_M3_MODEL_PATH;
 if (modelPath === undefined || modelPath.length === 0) throw new Error('set TAGA_BGE_M3_MODEL_PATH or pass --model=<path>');
-const rerankerModelPath = argument('reranker-model') ?? process.env.TAGA_RERANKER_MODEL_PATH;
-const rerankTopK = positiveInteger(argument('rerank-top-k') ?? process.env.TAGA_RERANK_TOP_K ?? '30', 'rerank-top-k');
-const rerankTimeoutMs = positiveInteger(argument('rerank-timeout-ms') ?? process.env.TAGA_RERANK_TIMEOUT_MS ?? '600000', 'rerank-timeout-ms');
 const suite = argument('suite') ?? 'golden-19';
 if (!['golden-19', 'strict-300'].includes(suite)) throw new Error('supported suites: golden-19, strict-300');
 const dataset = evaluationDataset(suite);
@@ -28,14 +25,6 @@ try {
   const memories = dataset.memories;
   const cases = dataset.queries;
   const provider = new FtsRetrievalProvider(database);
-  const reranker = rerankerModelPath === undefined || rerankerModelPath.length === 0
-    ? undefined
-    : createLocalCrossEncoderReranker({ modelPath: rerankerModelPath });
-  const hybridOptions = reranker === undefined
-    ? {}
-    : { reranker, rerankTopK, rerankTimeoutMs };
-  let rerankerApplied = 0;
-  let rerankerDegraded = 0;
   for (const item of memories) provider.upsert(item.memory, item.body);
 
   const rssBeforeModel = sampleRss();
@@ -84,9 +73,7 @@ try {
     const semantic = await retriever.search(input);
     const semanticMs = performance.now() - semanticStarted;
     const hybridStarted = performance.now();
-    const hybrid = await provider.searchHybrid(input, { search: () => Promise.resolve(semantic) }, hybridOptions);
-    if (hybrid.rerankerAvailable === true) rerankerApplied += 1;
-    if (hybrid.rerankerDegraded === true) rerankerDegraded += 1;
+    const hybrid = await provider.searchHybrid(input, { search: () => Promise.resolve(semantic) });
     const hybridFusionMs = performance.now() - hybridStarted;
     sampleRss();
     queryRows.push({
@@ -100,12 +87,10 @@ try {
       lexicalIds: lexical.map(({ memory }) => memory.id),
       semanticIds: semantic.map(({ memory }) => memory.id),
       hybridIds: hybrid.items.map(({ memory }) => memory.id),
-      rerankerApplied: hybrid.rerankerAvailable === true,
-      rerankerDegraded: hybrid.rerankerDegraded === true,
       latencyMs: { lexical: round(lexicalMs), semantic: round(semanticMs), hybridFusion: round(hybridFusionMs) },
     });
     if (queryRows.length === 1 || queryRows.length % 25 === 0 || queryRows.length === cases.length) {
-      console.error(`[semantic-eval] queries=${queryRows.length}/${cases.length} rerankerApplied=${rerankerApplied} rerankerDegraded=${rerankerDegraded} elapsedMs=${round(performance.now() - evaluationStarted)}`);
+      console.error(`[semantic-eval] queries=${queryRows.length}/${cases.length} elapsedMs=${round(performance.now() - evaluationStarted)}`);
     }
   }
 
@@ -126,7 +111,6 @@ try {
     await provider.searchHybrid(
       { query: testCase.query, limit: 10, ...(testCase.scope === undefined ? {} : { scope: testCase.scope }) },
       retriever,
-      hybridOptions,
     );
     hybridDurations.push(performance.now() - hybridStarted);
     sampleRss();
@@ -167,17 +151,6 @@ try {
     evidenceKind: dataset.evidenceKind,
     limitations: dataset.limitations,
     model: embedder.metadata,
-    reranker: {
-      enabled: reranker !== undefined,
-      ...(reranker === undefined ? {} : {
-        modelPath: rerankerModelPath,
-        metadata: reranker.metadata,
-        topK: rerankTopK,
-        timeoutMs: rerankTimeoutMs,
-      }),
-      applied: rerankerApplied,
-      degraded: rerankerDegraded,
-    },
     system: {
       node: process.version,
       platform: platform(),
@@ -494,10 +467,4 @@ function round(value) {
 function argument(name) {
   const prefix = `--${name}=`;
   return process.argv.find((value) => value.startsWith(prefix))?.slice(prefix.length);
-}
-
-function positiveInteger(value, name) {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer`);
-  return parsed;
 }

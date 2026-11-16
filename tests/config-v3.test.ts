@@ -33,8 +33,6 @@ describe('schemaVersion 3 configuration', () => {
       '  semantic:',
       '    mode: off',
       '    modelPath: file-model',
-      '  rerank:',
-      '    topK: 20',
       'learning:',
       '  allowNetwork: false',
     ].join('\n'), 'utf8');
@@ -44,30 +42,25 @@ describe('schemaVersion 3 configuration', () => {
       configPath,
       env: {
         TAGA_BRAIN: join(fixture.path, 'env-brain'),
-        TAGA_RERANK_TOP_K: '40',
         TAGA_LEARN_ALLOW_NETWORK: 'true',
         TAGA_LLM_API_KEY: 'top-secret',
       },
       overrides: {
         paths: { brain: join(fixture.path, 'override-brain') },
-        retrieval: { rerank: { topK: 60 } },
       },
     });
 
     expect(loaded.config.paths.brain).toBe(join(fixture.path, 'override-brain'));
-    expect(loaded.config.retrieval.rerank.topK).toBe(60);
     expect(loaded.config.learning.allowNetwork).toBe(true);
     expect(loaded.sources['paths.brain']).toBe('override');
-    expect(loaded.sources['retrieval.rerank.topK']).toBe('override');
     expect(loaded.sources['learning.allowNetwork']).toBe('environment');
     expect(redactedConfig(loaded.config).llm.apiKey).toBe('[redacted]');
     expect(JSON.stringify(redactedConfig(loaded.config))).not.toContain('top-secret');
     await fixture.cleanup();
   });
 
-  it('rejects unknown keys and invalid explicit environment values', async () => {
+  it('rejects unknown keys', () => {
     expect(() => parseConfigText('schemaVersion: 3\nunknown: true\n', 'fixture')).toThrow(ConfigurationError);
-    await expect(loadConfig({ env: { TAGA_RERANK_TOP_K: 'many' } })).rejects.toThrow('TAGA_RERANK_TOP_K');
   });
 
   it('migrates legacy behavior without persisting API keys or generated paths', () => {

@@ -1,7 +1,6 @@
 import { scopeWeight } from '../../application/src/index.js';
 import type { Memory, MemoryType, Scope } from '../../domain/src/index.js';
 import type { DatabaseStore, MemoryIndexEntry } from '../../storage/src/index.js';
-import type { RerankCandidate, Reranker } from './reranker.js';
 
 export interface SearchInput {
   readonly query: string;
@@ -46,17 +45,6 @@ export interface HybridRetrievalResult {
   readonly degraded: boolean;
   readonly semanticAvailable: boolean;
   readonly repairSuggestion?: 'reindex';
-  readonly rerankerAvailable?: boolean;
-  readonly rerankerDegraded?: boolean;
-}
-
-export interface HybridRetrievalOptions {
-  readonly lexicalWeight?: number;
-  readonly semanticWeight?: number;
-  readonly reranker?: Reranker;
-  readonly rerankTopK?: number;
-  readonly rerankTimeoutMs?: number;
-  readonly includeDraft?: boolean;
 }
 
 export interface ProgressiveIndexRow {
@@ -177,7 +165,7 @@ export class FtsRetrievalProvider {
     return results.slice(0, limit);
   }
 
-  async searchHybrid(input: SearchInput, semantic: SemanticRetriever | undefined, options: HybridRetrievalOptions = {}): Promise<HybridRetrievalResult> {
+  async searchHybrid(input: SearchInput, semantic: SemanticRetriever | undefined): Promise<HybridRetrievalResult> {
     const lexical = this.search(input).map((item) => ({
       memory: item.memory,
       score: item.score,
@@ -188,55 +176,23 @@ export class FtsRetrievalProvider {
         items: lexical.map((item) => ({ ...item, relevance: item.score, source: 'fts5' as const })),
         degraded: false,
         semanticAvailable: false,
-        ...(options.reranker === undefined ? {} : { rerankerAvailable: false, rerankerDegraded: true }),
       };
     }
     try {
       const semanticResults = await semantic.search(input);
       const filtered = semanticResults.filter((item) => isRecallable(item.memory, input.scope, input));
-      const fused = fuseRankedResults(lexical, filtered, { ...options, includeDraft: options.includeDraft ?? input.includeDraft === true });
-      if (options.reranker === undefined) {
-        return {
-          items: fused.slice(0, input.limit ?? 10),
-          degraded: false,
-          semanticAvailable: true,
-        };
-      }
-      try {
-        const reranked = await options.reranker.rerank({
-          query: input.query,
-          candidates: fused.slice(0, options.rerankTopK ?? Math.max(input.limit ?? 10, 20)).map(toRerankCandidate),
-          limit: options.rerankTopK ?? Math.max(input.limit ?? 10, 20),
-          ...(options.rerankTimeoutMs === undefined ? {} : { timeoutMs: options.rerankTimeoutMs }),
-        });
-        const byId = new Map(fused.map((item) => [item.memory.id, item]));
-        const items = reranked.flatMap((candidate) => {
-          const item = byId.get(candidate.memoryId);
-          return item === undefined ? [] : [{ ...item, score: candidate.rerankScore, relevance: candidate.rerankScore, matchReason: [...item.matchReason, 'rerank:cross-encoder'] }];
-        });
-        return {
-          items: [...items, ...fused.filter((item) => !items.some((candidate) => candidate.memory.id === item.memory.id))].slice(0, input.limit ?? 10),
-          degraded: false,
-          semanticAvailable: true,
-          rerankerAvailable: true,
-          rerankerDegraded: false,
-        };
-      } catch {
-        return {
-          items: fused.slice(0, input.limit ?? 10),
-          degraded: false,
-          semanticAvailable: true,
-          rerankerAvailable: false,
-          rerankerDegraded: true,
-        };
-      }
+      const fused = fuseRankedResults(lexical, filtered, { includeDraft: input.includeDraft === true });
+      return {
+        items: fused.slice(0, input.limit ?? 10),
+        degraded: false,
+        semanticAvailable: true,
+      };
     } catch {
       return {
         items: lexical.map((item) => ({ ...item, relevance: item.score, source: 'fts5' as const, matchReason: [...item.matchReason, 'semantic:unavailable'] })),
         degraded: true,
         semanticAvailable: false,
         repairSuggestion: 'reindex' as const,
-        ...(options.reranker === undefined ? {} : { rerankerAvailable: false, rerankerDegraded: true }),
       };
     }
   }
@@ -629,17 +585,6 @@ function fuseRankedResults(
       };
     })
     .sort((left, right) => right.relevance - left.relevance || left.memory.id.localeCompare(right.memory.id));
-}
-
-function toRerankCandidate(item: HybridRecallCandidate, index: number): RerankCandidate {
-  return {
-    memoryId: item.memory.id,
-    title: item.memory.title,
-    summary: item.memory.summary,
-    snippet: item.memory.body.slice(0, 1800),
-    fusedScore: item.relevance,
-    fusedRank: index + 1,
-  };
 }
 
 export interface RetrievalResult {

@@ -25,17 +25,8 @@ const semanticFileSchema = z.object({
   modelPath: nonEmptyString.optional(),
 }).strict();
 
-const rerankFileSchema = z.object({
-  mode: featureModeSchema.optional(),
-  modelPath: nonEmptyString.optional(),
-  modelId: nonEmptyString.optional(),
-  topK: z.number().int().positive().max(100).optional(),
-  timeoutMs: z.number().int().positive().optional(),
-}).strict();
-
 const retrievalFileSchema = z.object({
   semantic: semanticFileSchema.optional(),
-  rerank: rerankFileSchema.optional(),
 }).strict();
 
 const llmFileSchema = z.object({
@@ -117,7 +108,6 @@ const legacyConfigSchema = z.object({
   semantic: z.object({
     mode: featureModeSchema.optional(),
     modelPath: nonEmptyString.optional(),
-    rerankMode: featureModeSchema.optional(),
   }).passthrough().optional(),
   consolidation: z.object({
     mode: z.enum(['off', 'on']).optional(),
@@ -153,13 +143,6 @@ export interface ResolvedConfig {
     readonly semantic: {
       readonly mode: FeatureMode;
       readonly modelPath: string;
-    };
-    readonly rerank: {
-      readonly mode: FeatureMode;
-      readonly modelPath: string;
-      readonly modelId: string;
-      readonly topK: number;
-      readonly timeoutMs: number;
     };
   };
   readonly llm: {
@@ -200,7 +183,6 @@ export interface ConfigOverrides {
   readonly agents?: { readonly enabled?: readonly string[]; readonly writeInstructions?: boolean };
   readonly retrieval?: {
     readonly semantic?: { readonly mode?: FeatureMode; readonly modelPath?: string };
-    readonly rerank?: { readonly mode?: FeatureMode; readonly modelPath?: string; readonly modelId?: string; readonly topK?: number; readonly timeoutMs?: number };
   };
   readonly llm?: { readonly mode?: FeatureMode; readonly provider?: string; readonly endpoint?: string; readonly model?: string; readonly timeoutMs?: number; readonly dailyCap?: number };
   readonly consolidation?: {
@@ -320,7 +302,6 @@ export function migrateLegacyConfig(legacy: z.infer<typeof legacyConfigSchema>):
           ...(legacy.semantic?.mode === undefined ? {} : { mode: legacy.semantic.mode }),
           ...(legacy.semantic?.modelPath === undefined ? {} : { modelPath: legacy.semantic.modelPath }),
         },
-        rerank: legacy.semantic?.rerankMode === undefined ? {} : { mode: legacy.semantic.rerankMode },
       },
       ...(legacyLlm === undefined ? {} : {
         llm: {
@@ -368,13 +349,6 @@ export function configFileFromResolved(config: ResolvedConfig): ConfigFileV3 {
     agents: { enabled: [...config.agents.enabled], writeInstructions: config.agents.writeInstructions },
     retrieval: {
       semantic: { mode: config.retrieval.semantic.mode, ...(config.retrieval.semantic.modelPath.length === 0 ? {} : { modelPath: config.retrieval.semantic.modelPath }) },
-      rerank: {
-        mode: config.retrieval.rerank.mode,
-        ...(config.retrieval.rerank.modelPath.length === 0 ? {} : { modelPath: config.retrieval.rerank.modelPath }),
-        ...(config.retrieval.rerank.modelId.length === 0 ? {} : { modelId: config.retrieval.rerank.modelId }),
-        topK: config.retrieval.rerank.topK,
-        timeoutMs: config.retrieval.rerank.timeoutMs,
-      },
     },
     llm: {
       mode: config.llm.mode,
@@ -425,7 +399,6 @@ export function createDefaultConfig(cwd: string = resolve(process.cwd()), brain:
     agents: { enabled: [], writeInstructions: true },
     retrieval: {
       semantic: { mode: 'off', modelPath: '' },
-      rerank: { mode: 'off', modelPath: '', modelId: '', topK: 30, timeoutMs: 350 },
     },
     llm: { mode: 'off', provider: 'openai-compatible', endpoint: '', model: '', timeoutMs: 30_000 },
     consolidation: {
@@ -464,13 +437,6 @@ function resolveLayers(defaults: ResolvedConfig, file: ConfigFileV3 | null, env:
       semantic: {
         mode: pick('retrieval.semantic.mode', overrides.retrieval?.semantic?.mode, optionalMode(env, 'TAGA_SEMANTIC_MODE'), file?.retrieval?.semantic?.mode, defaults.retrieval.semantic.mode),
         modelPath: resolveLayeredOptionalPath('retrieval.semantic.modelPath', pick('retrieval.semantic.modelPath', overrides.retrieval?.semantic?.modelPath, optionalString(env, 'TAGA_BGE_M3_MODEL_PATH'), file?.retrieval?.semantic?.modelPath, defaults.retrieval.semantic.modelPath), sources, cwd, fileBase),
-      },
-      rerank: {
-        mode: pick('retrieval.rerank.mode', overrides.retrieval?.rerank?.mode, optionalMode(env, 'TAGA_RERANK_MODE'), file?.retrieval?.rerank?.mode, defaults.retrieval.rerank.mode),
-        modelPath: resolveLayeredOptionalPath('retrieval.rerank.modelPath', pick('retrieval.rerank.modelPath', overrides.retrieval?.rerank?.modelPath, optionalString(env, 'TAGA_RERANKER_MODEL_PATH'), file?.retrieval?.rerank?.modelPath, defaults.retrieval.rerank.modelPath), sources, cwd, fileBase),
-        modelId: pick('retrieval.rerank.modelId', overrides.retrieval?.rerank?.modelId, optionalString(env, 'TAGA_RERANKER_MODEL_ID'), file?.retrieval?.rerank?.modelId, defaults.retrieval.rerank.modelId),
-        topK: pick('retrieval.rerank.topK', overrides.retrieval?.rerank?.topK, optionalPositiveInt(env, 'TAGA_RERANK_TOP_K'), file?.retrieval?.rerank?.topK, defaults.retrieval.rerank.topK),
-        timeoutMs: pick('retrieval.rerank.timeoutMs', overrides.retrieval?.rerank?.timeoutMs, optionalPositiveInt(env, 'TAGA_RERANK_TIMEOUT_MS'), file?.retrieval?.rerank?.timeoutMs, defaults.retrieval.rerank.timeoutMs),
       },
     },
     llm: {
@@ -511,7 +477,6 @@ function resolveLayers(defaults: ResolvedConfig, file: ConfigFileV3 | null, env:
 function validateResolved(config: ResolvedConfig): void {
   const issues: string[] = [];
   if (config.retrieval.semantic.mode !== 'off' && config.retrieval.semantic.modelPath.length === 0) issues.push('retrieval.semantic.modelPath is required when semantic mode is enabled');
-  if (config.retrieval.rerank.mode !== 'off' && config.retrieval.rerank.modelPath.length === 0) issues.push('retrieval.rerank.modelPath is required when rerank mode is enabled');
   if (config.llm.mode !== 'off' && config.llm.endpoint.length === 0) issues.push('llm.endpoint is required when llm mode is enabled');
   if (config.llm.mode !== 'off' && config.llm.model.length === 0) issues.push('llm.model is required when llm mode is enabled');
   if (config.consolidation.deduplication.mergeSimilarity > config.consolidation.deduplication.rejectSimilarity) issues.push('consolidation.deduplication.mergeSimilarity must be <= rejectSimilarity');

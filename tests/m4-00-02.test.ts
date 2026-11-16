@@ -7,7 +7,7 @@ import {
   LlmDistiller,
   ShadowDistiller,
   proposeConsolidation,
-  rerankCandidates,
+  rankCandidates,
   type DistillationInput,
   type StructuredCompletionProvider,
 } from '../packages/distillation/src/index.js';
@@ -139,7 +139,7 @@ function createMemory(id: string, title: string, body: string): Memory {
   };
 }
 
-describe('M4 consolidation and reranking', () => {
+describe('M4 consolidation and candidate ranking', () => {
   it('creates source-preserving merge and conflict proposals', async () => {
     const first = await new DistillationService(new FakeDistiller(), new InMemoryCandidateRepository()).createCandidate(input);
     const second = await new DistillationService(new FakeDistiller(), new InMemoryCandidateRepository()).createCandidate({
@@ -149,11 +149,11 @@ describe('M4 consolidation and reranking', () => {
     });
     const proposals = proposeConsolidation([first!, second!], '2026-11-12T01:00:00.000Z');
     expect(proposals[0]).toMatchObject({ kind: 'merge', evidenceIds: ['evidence-m4', 'evidence-m4-2'] });
-    const reranked = rerankCandidates([
+    const ranked = rankCandidates([
       { candidate: first!, relevance: 0.6, freshness: 0.5, scope: 0.5, sourceTrust: 0.5 },
       { candidate: second!, relevance: 0.9, freshness: 0.5, scope: 0.5, sourceTrust: 0.5 },
     ]);
-    expect(reranked[0]?.candidate.id).toBe(second!.id);
+    expect(ranked[0]?.candidate.id).toBe(second!.id);
   });
 });
 describe('M4 hybrid and progressive retrieval', () => {

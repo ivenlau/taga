@@ -1,62 +1,51 @@
 # Taga
 
-Taga 是一个本地优先、可审计、面向 AI Agent 的长期记忆框架。它将 Markdown 作为记忆事实源，使用 SQLite/FTS5 提供可靠的本地检索，并可选接入 BGE-M3 与 Zvec，实现离线语义召回和混合排序。
+Taga 是一个本地优先、可审计的 AI Agent 长期记忆框架。它把 Markdown 记忆作为事实源，用 SQLite/FTS5 完成本地检索，并可选接入本地 BGE-M3 和 Zvec，向 Agent 提供可追踪的记忆、上下文和治理能力。
 
-项目目前处于早期开发阶段，适合本地开发、验证和二次集成，尚未作为稳定公共包发布。
+> 当前版本：`0.1.0`。项目仍在快速迭代，配置、命令和存储格式可能发生变化。
 
-## 核心能力
+## 为什么是 Taga
 
-- Markdown 记忆事实源，SQLite、FTS5 和向量索引均可重建。
-- Memory 生命周期、Evidence、反馈、遗忘和治理审计。
-- FTS5 词法检索，以及 BGE-M3 + Zvec 本地语义检索。
-- 词法结果与语义结果通过 equal-weight Reciprocal Rank Fusion（equal-RRF）融合。
-- 可选的 `bge-reranker-v2-m3` cross-encoder 重排，并在失败时回退 RRF。
-- 可选的后台自动整合：embedding 语义去重、useful 反馈驱动的 draft 自动晋升，全部审计可回溯。
-- 可选的 OpenAI 兼容 LLM 插槽，用于重复记忆的 merge-or-keep 裁决。
-- Session-start Context Pack、缓存失效和完整 session observation timeline。
-- CLI、JSON Lines MCP 进程和后台 daemon。
-- Claude Code、Codex、pi、OpenCode 等 Agent 适配基础设施。
-- 本地脱敏、审计、恢复、doctor 和 release gate。
+- **本地优先**：记忆、索引和审计数据默认保存在本机 Brain 目录。
+- **可审计**：写入、反馈、生命周期变更、召回、注入和自动治理都保留审计轨迹。
+- **可控召回**：未确认的 candidate/draft 不进入默认召回，Context Pack 会说明纳入、排除和截断原因。
+- **渐进增强**：默认使用 FTS5；需要时再启用本地语义检索、LLM 和后台整合。
+- **多入口集成**：提供 CLI、JSON Lines MCP server 和后台 daemon，并包含 Claude Code、Codex、pi、OpenCode 等 Agent 适配基础设施。
 
-## 架构
+## 工作方式
 
 ```text
 Agent / CLI / MCP
         |
         v
-Memory governance and session context
+记忆治理、检索与 Context Pack
         |
-        +--> Markdown memories (source of truth)
-        +--> SQLite + FTS5 (metadata and lexical recall)
-        +--> BGE-M3 + Zvec (optional semantic recall)
-        +--> BGE reranker (optional experimental reranking)
+        +--> Markdown：规范记忆事实源
+        +--> SQLite + FTS5：元数据、审计和词法检索
+        +--> BGE-M3 + Zvec：可选的本地语义检索
 ```
 
-主要目录：
+Brain 中的 Markdown 是规范数据源；SQLite、FTS5 和向量索引属于可重建的派生数据。这个边界让 Taga 可以在索引损坏、迁移或升级后重新构建，而不依赖不可解释的黑盒状态。
 
-```text
-apps/cli               Taga CLI
-apps/mcp               JSON Lines MCP server
-apps/daemon            本地采集和语义索引 daemon
-packages/domain        Memory 领域模型
-packages/storage       SQLite、迁移和审计存储
-packages/retrieval     FTS5、RRF 和 reranker
-packages/embedding     本地 Transformers.js embedding
-packages/semantic-index Zvec 索引和 semantic retriever
-packages/session       Session context pack 和 timeline
-tests/                 单元、集成和性能测试
-scripts/               严格语义评测脚本
+## 安装
+
+### 使用 npm 包
+
+发布版本可安装两个命令：
+
+```bash
+npm install --global taga
+taga-mcp
 ```
 
-## 环境要求
+### 从源码开发
+
+环境要求：
 
 - Node.js `>=22 <25`
 - pnpm `10.32.1`
-- Windows 或 Linux；macOS daemon service 支持基于 launchd
-- 可选：本地 Transformers.js 格式的 BGE-M3 模型
-- 可选：本地 ONNX 格式的 `bge-reranker-v2-m3`
-
-## 开发安装
+- Windows、Linux 或 macOS
+- Linux/macOS 支持用户级 systemd/launchd daemon；Windows 使用 Taga 自己的后台进程管理
 
 ```bash
 git clone https://github.com/ivenlau/taga.git
@@ -65,153 +54,127 @@ pnpm install --frozen-lockfile
 pnpm run build
 ```
 
-发布：`pnpm run build && pnpm run release:tag`（打 tag 触发 release 工作流：build、lint、隔离的 CI 测试、性能 benchmark、npm 临时安装冒烟验证后发布 `taga` 包）。本地组装发布包：`pnpm run release:package`（生成 `npm-package/`）；本地验证发布包：`pnpm run release:smoke`。发布需要 GitHub 仓库配置 `NPM_TOKEN` secret，且 tag 必须严格匹配 `package.json` 版本。
-
-安装（发布后）：`npm i -g taga` 提供 `taga` 与 `taga-mcp` 两个命令。
-
-开发时直接运行编译后的入口：
+源码运行时，入口位于 `dist/`：
 
 ```bash
 node dist/apps/cli/src/main.js doctor --json
 node dist/apps/mcp/src/main.js
-node dist/apps/daemon/src/main.js --brain=./brain
+node dist/apps/daemon/src/main.js
 ```
 
 ## 快速开始
 
-初始化 Brain 和当前项目：
+### 1. 初始化 Brain
 
 ```bash
-node dist/apps/cli/src/main.js init --brain=./brain --project=. --agent=local
-node dist/apps/cli/src/main.js doctor --brain=./brain --json
-node dist/apps/cli/src/main.js reindex --brain=./brain
+taga init --brain=./brain --project=. --agent=local
+taga doctor --brain=./brain --json
+taga reindex --brain=./brain
 ```
 
-接入真实 Agent（注册会话采集适配器，并把记忆使用指令写入项目的 `CLAUDE.md` / `AGENTS.md` 以及对应的全局指令文件）：
+`init` 会创建标准配置和 Brain 目录。配置文件使用 block-style YAML，不把配置再编码成嵌套 JSON。
+
+### 2. 记录和检索记忆
 
 ```bash
-node dist/apps/cli/src/main.js init --agent=claude-code,codex --yes
+taga memory ls --brain=./brain
+taga memory search "retry policy" --brain=./brain
+taga memory show <memory-id> --brain=./brain
+taga memory timeline <memory-id> --brain=./brain
 ```
 
-指令块由 `taga:instructions:begin/end` 标记管理，重复 init 幂等；`--no-instructions` 可跳过注入。注册适配器后，daemon 会自动采集 agent 会话日志并蒸馏 candidate 进审核队列。
+CLI 默认输出适合终端阅读；增加 `--json` 可获得结构化输出。涉及遗忘等高风险操作时需要显式提供 `--yes`。
 
-常用命令：
+### 3. 为会话生成 Context Pack
 
 ```bash
-node dist/apps/cli/src/main.js memory ls --brain=./brain
-node dist/apps/cli/src/main.js memory search "retry policy" --brain=./brain
-node dist/apps/cli/src/main.js context start --brain=./brain
-node dist/apps/cli/src/main.js daemon start --brain=./brain
-node dist/apps/cli/src/main.js daemon status --brain=./brain
-node dist/apps/cli/src/main.js vector status --brain=./brain
+taga context preview --brain=./brain --agent=codex --task="fix configuration loading" --json
+taga context start --brain=./brain --agent=codex --session-id=session-001 --task="fix configuration loading"
 ```
 
-CLI 默认输出适合终端阅读；增加 `--json` 可获得结构化响应。
-
-## 本地语义检索
-
-模型必须预先存在于本机，Taga 不会在运行期间自动联网下载模型。
-
-PowerShell 示例：
-
-```powershell
-$env:TAGA_BRAIN = "D:\data\taga-brain"
-$env:TAGA_BGE_M3_MODEL_PATH = "D:\models\Xenova\bge-m3"
-$env:TAGA_SEMANTIC_MODE = "on"
-$env:TAGA_RERANK_MODE = "off"
-```
-
-Bash 示例：
+需要写入 Agent 指令文件时，可以在初始化阶段注册适配器并注入托管指令块：
 
 ```bash
-export TAGA_BRAIN="$HOME/.taga/brain"
-export TAGA_BGE_M3_MODEL_PATH="$HOME/models/Xenova/bge-m3"
-export TAGA_SEMANTIC_MODE=on
-export TAGA_RERANK_MODE=off
+taga init --agent=claude-code,codex --yes
+taga context start --agent=codex --session-id=session-001 --inject
 ```
 
-推荐的当前默认组合是：
+Taga 只维护 `taga:instructions:begin/end` 标记之间的内容，重复执行初始化是幂等的；不需要注入时使用 `--no-instructions`。
 
-```text
-TAGA_SEMANTIC_MODE=on
-TAGA_RERANK_MODE=off
-```
+## CLI 命令
 
-该配置会启用 BGE-M3 + Zvec，并使用词法与语义权重均为 `1` 的 equal-RRF。未配置模型或语义索引异常时，系统会降级到 FTS5 Fast Path。
+常用命令如下，完整行为以当前版本实现为准：
 
-## 自动记忆整合（可选）
+| 命令 | 用途 |
+| --- | --- |
+| `init` | 初始化 Brain、配置和 Agent 适配器 |
+| `doctor` | 检查平台、存储、索引和运行状态 |
+| `config validate` | 校验当前有效配置 |
+| `config show` | 查看脱敏后的有效配置及每项来源 |
+| `config migrate --write` | 将旧版 `_config.yaml` 迁移为 schema v3 |
+| `memory` | 列表、搜索、查看、编辑、反馈和生命周期管理 |
+| `context` | 构建、预览、解释和追踪 Context Pack |
+| `agent` | 检测 Agent、查看目标、采集会话和执行验收 |
+| `daemon` | 启动、停止、安装和管理后台 daemon |
+| `vector` | 查看、重建、同步和优化语义索引 |
+| `reindex` | 从 Markdown 重建派生索引 |
+| `precheck` | 在编辑前检查相关记忆和操作提示 |
+| `pack` | 管理领域知识包 |
+| `release` | 查看和记录发布门禁证据 |
 
-默认关闭。设置 `TAGA_CONSOLIDATION_MODE=on` 后，daemon 的后台 `consolidation.scan` 任务会：
+## 配置
 
-1. **语义去重**：对新 draft 计算与 active 记忆的 BGE-M3 余弦相似度。`≥ TAGA_DEDUP_REJECT_SIMILARITY`（默认 0.95）判定为重复、`≥ TAGA_DEDUP_MERGE_SIMILARITY`（默认 0.88）判定为重叠——两者都会生成 garden proposal 并通知，不进入自动晋升；相似度更低则视为新颖。
-2. **反馈自动晋升**：draft 累计 `usefulCount ≥ TAGA_AUTO_PROMOTE_USEFUL_COUNT`（默认 2）且未被去重拦截时，按 `proactive.autoActivateFeedback` 策略自动转为 active，审计事件以 `actor: daemon` 落账并发送 L1 通知。`notUsefulCount ≥ TAGA_AUTO_PROMOTE_MAX_NOT_USEFUL`（默认 2）的 draft 不再自动晋升。
-3. **LLM merge 裁决（可选插槽）**：配置 `TAGA_LLM_MODE=on` 与 OpenAI 兼容端点后，重叠区间（0.88–0.95）的 draft 交由 LLM 做 merge-or-keep 裁决；判定 merge 时生成合并文本供 garden review 采纳，不自动改写 active 记忆。未配置 LLM 时重叠 draft 直接进入人工 review。语义索引不可用时去重降级跳过，晋升不受影响。
+### 配置文件位置
 
-相关环境变量：
+默认配置文件为 `config.yaml`：
 
-```bash
-TAGA_CONSOLIDATION_MODE=off            # on 开启后台整合
-TAGA_AUTO_PROMOTE_USEFUL_COUNT=2      # 自动晋升所需 useful 反馈数
-TAGA_AUTO_PROMOTE_MAX_NOT_USEFUL=2    # 超过则不再自动晋升
-TAGA_DEDUP_REJECT_SIMILARITY=0.95     # 重复判定阈值
-TAGA_DEDUP_MERGE_SIMILARITY=0.88      # 重叠判定下限
-TAGA_CONSOLIDATION_SCAN_INTERVAL_MS=600000
-TAGA_LLM_MODE=off                     # on 启用 LLM merge 裁决
-TAGA_LLM_ENDPOINT=                    # OpenAI 兼容端点（如本地 Ollama）
-TAGA_LLM_API_KEY=
-TAGA_LLM_MODEL=
-TAGA_LLM_TIMEOUT_MS=3000
-```
+| 平台 | 默认路径 |
+| --- | --- |
+| Windows | `%APPDATA%\\taga\\config.yaml` |
+| macOS | `~/Library/Application Support/taga/config.yaml` |
+| Linux | `${XDG_CONFIG_HOME:-~/.config}/taga/config.yaml` |
 
-### Draft 软召回
+也可以通过 `TAGA_CONFIG` 或命令行 `--config=<path>` 指定文件。使用 `--brain=<path>` 时，如果没有显式指定配置文件，会优先读取该 Brain 下的 `config.yaml`。
 
-MCP `memory_search` 支持显式 `include_draft: true`（CLI 为 `memory search --include-draft`），draft 结果以 `status:draft:unverified` 标记并降权 0.5。默认召回与静态 Context Pack 仍仅包含 active 记忆。搜索结果的 `proof` 字段与 `proof:useful:N` / `proof:verified` match-reason 标记展示每条记忆的反馈佐证，供调用方自行加权。
+### 优先级
 
-## 配置文件
+每个配置项按以下顺序解析，前者覆盖后者：
 
-Taga 使用一个用户可编辑的 `config.yaml`（schemaVersion 3）。默认位置：
+1. 命令行覆写，例如 `--brain`、初始化参数等。
+2. 环境变量，例如 `TAGA_BRAIN`、`TAGA_SEMANTIC_MODE`。
+3. `config.yaml` 中的 schema v3 配置。
+4. 内置默认值。
 
-- Windows：`%APPDATA%\taga\config.yaml`
-- Linux：`${XDG_CONFIG_HOME:-~/.config}/taga/config.yaml`
-- macOS：`~/Library/Application Support/taga/config.yaml`
-- 显式使用 `--brain=<path>` 且未指定配置路径时：`<brain>/config.yaml`，便于测试和隔离运行
+`taga config show --json` 会同时输出脱敏后的有效配置和每个字段的来源，适合排查“配置写了但没有生效”的问题。LLM API Key 不写入 YAML，只从 `TAGA_LLM_API_KEY` 读取。
 
-配置路径优先级为 `--config > TAGA_CONFIG > 平台默认路径`。字段优先级为 **当前请求/CLI 参数 > 环境变量 > 配置文件 > 默认值**：
+### 标准 YAML 示例
 
 ```yaml
 schemaVersion: 3
 
 paths:
-  brain: C:\Users\123\.taga\brain
-  project: D:\codebase\taga
+  brain: ./brain
+  project: .
 
 agents:
   enabled:
-    - claude-code
     - codex
   writeInstructions: true
 
 retrieval:
   semantic:
-    mode: on
-    modelPath: D:\models\bge-m3
-  rerank:
     mode: off
-    modelPath: D:\models\reranker
-    modelId: default
-    topK: 30
-    timeoutMs: 350
+    modelPath: /models/Xenova/bge-m3
 
 llm:
-  mode: shadow
+  mode: off
   provider: openai-compatible
   endpoint: http://127.0.0.1:11434/v1/chat/completions
-  model: MiniMax-M3
+  model: local-model
   timeoutMs: 30000
-  dailyCap: 100
 
 consolidation:
-  enabled: true
+  enabled: false
   scanIntervalMs: 600000
   promotion:
     minUsefulCount: 2
@@ -224,202 +187,208 @@ learning:
   allowNetwork: false
 
 reflection:
-  enabled: true
+  enabled: false
   intervalMs: 604800000
   windowDays: 7
   minGroupSize: 3
   maxGroups: 5
 ```
 
-配置文件经严格 zod schema 校验：未知键、非法类型和非法环境变量都会返回具体字段路径，不再静默回退。文件中的相对路径相对 `config.yaml` 目录解析；CLI 和环境变量中的相对路径相对当前工作目录解析。
-
-API Key 不属于配置 schema，只能通过 `TAGA_LLM_API_KEY` 提供；`config show` 会统一脱敏。长运行的 daemon 和 MCP 在启动时读取一次配置，修改后需要重启。
-
-配置诊断与迁移：
+校验和查看有效配置：
 
 ```bash
 taga config validate
-taga config show --effective
-taga config migrate              # 预览 v1/v2 迁移
-taga config migrate --write      # 写入 schemaVersion 3，旧文件保留
+taga config show --json
 ```
 
-旧版 Brain 内的 `_config.yaml` 会在新配置缺失时只读加载并给出迁移提示。`projectId`、agent target paths、数据库、锁和健康状态均由运行时派生，不再写入用户配置，也不再生成冗余的 `agents/*.yaml`。
-
-## 用户指定知识学习（`taga learn`）
-
-把文字、文件、文件夹或网页内容喂给 Taga 学习——内容经脱敏、切块、语义去重后由蒸馏管道提炼为候选记忆，进审核队列：
+旧版 schema v1/v2 配置会以只读兼容方式加载。确认迁移结果后执行：
 
 ```bash
-node dist/apps/cli/src/main.js learn --text="..." --type=lessons
-node dist/apps/cli/src/main.js learn --file=D:\notes\arch.md
-node dist/apps/cli/src/main.js learn --dir=D:\notes --include=.md,.txt
-node dist/apps/cli/src/main.js learn --url=https://example.com/post --allow-network
+taga config migrate
+taga config migrate --write
 ```
 
-- 提炼而非全文存储：每个知识块蒸馏出 1~3 条事实型 candidate，原文位置（file/url + hash）存入 sources 可随时溯源
-- 学习前语义去重：与现有 active 记忆比 BGE-M3 余弦，≥0.95 直接跳过（省 LLM 调用）；distill 管道同样挂了 `duplicateGate`（候选级语义去重）
-- **网络安全**：URL 学习默认拒绝，`TAGA_LEARN_ALLOW_NETWORK=1` 显式开启；抓取内容过脱敏规则后才入库
-- 防跑飞：默认跳过 `node_modules`/`.git`/隐藏目录，单文件 ≤512KB，单次 ≤50 块（`--max-blocks` 可调）
-- MCP 侧提供 `knowledge_ingest` 工具：agent 可以把用户口述的知识入队，daemon 后台蒸馏
-- **目录监视**：`learn --watch --dir=D:
-otes [--interval-ms=30000]` 前台轮询，文件 hash 增量状态持久化，新/变更文件自动学习，Ctrl+C 退出
+迁移不会把旧版 API Key 写入新文件；请改用 `TAGA_LLM_API_KEY`。
 
-## Reflect 周期反思（可选）
+### 环境变量
 
-`TAGA_REFLECT_MODE=on` 后，daemon 按周（`TAGA_REFLECT_INTERVAL_MS`，默认 7 天）把近期活跃的 active 记忆按类型+作用域分组（组内 ≥ `TAGA_REFLECT_MIN_GROUP` 条，默认 3），交给 LLM 提炼一条**更高层的洞察 candidate**（"这些记忆共同指向什么规律"），进审核队列。相关环境变量：
+环境变量适合临时覆盖配置或注入敏感信息。常用变量：
+
+| 变量 | 说明 |
+| --- | --- |
+| `TAGA_CONFIG` | 指定 YAML 配置文件 |
+| `TAGA_BRAIN` | 覆盖 Brain 路径 |
+| `TAGA_PROJECT` | 覆盖项目路径 |
+| `TAGA_SEMANTIC_MODE` | `off`、`shadow` 或 `on` |
+| `TAGA_BGE_M3_MODEL_PATH` | 本地 BGE-M3 模型目录 |
+| `TAGA_LLM_MODE` | `off`、`shadow` 或 `on` |
+| `TAGA_LLM_ENDPOINT` | OpenAI 兼容 Chat Completions 地址 |
+| `TAGA_LLM_MODEL` | LLM 模型名 |
+| `TAGA_LLM_API_KEY` | LLM API Key，仅支持环境变量 |
+| `TAGA_LLM_DAILY_CAP` | 每日 LLM 调用上限 |
+| `TAGA_CONSOLIDATION_MODE` | `on` 或 `off` |
+| `TAGA_LEARN_ALLOW_NETWORK` | 是否允许学习流程联网 |
+
+## 检索与自动治理
+
+### 词法和语义检索
+
+默认使用 SQLite FTS5。启用本地语义检索前，需要自行准备 Transformers.js 格式的 BGE-M3 模型；Taga 不会在运行时自动下载模型：
 
 ```bash
-TAGA_REFLECT_MODE=off            # on 开启周期反思
-TAGA_REFLECT_INTERVAL_MS=604800000
-TAGA_REFLECT_WINDOW_DAYS=7       # 只反思窗口内活跃的记忆
-TAGA_REFLECT_MIN_GROUP=3
-TAGA_REFLECT_MAX_GROUPS=5
+export TAGA_BGE_M3_MODEL_PATH="$HOME/models/Xenova/bge-m3"
+export TAGA_SEMANTIC_MODE=on
+taga reindex
+taga memory search "local retry strategy" --semantic-mode=on
 ```
 
-反思需要 LLM（`TAGA_LLM_MODE=on`）：每次反思产生 1 条洞察 candidate、1 条冗余合并 garden 提案 + `reflect.completed`/`reflect.group` 审计事件和 L1 通知。Markdown 解析对 CRLF 行尾容错（外部编辑器改过的记忆文件不再被静默忽略）。
-- **纠错学习**：`memory_feedback kind=conflict` 会自动触发一次以冲突上下文为证据的蒸馏（原记忆哪不可靠、正确是什么），产出的修正 lessons candidate 同样进审核队列，每条记忆每天最多触发一次
-- **冗余提案**：每个反思分组会同时归档一条 garden 提案（"这 N 条记忆主题趋同，考虑合并"），与洞察 candidate 一并供人工处置
+`shadow` 模式会执行语义路径但仍以词法结果为主，适合比较质量和延迟；`on` 模式才会把混合检索结果用于返回。混合检索使用 equal-weight RRF。
 
-## LLM 适配（可选）
+### LLM 和后台整合
 
-Taga 的 LLM 能力默认关闭。设置以下环境变量后，OpenAI 兼容端点会驱动两个消费点：
+LLM 支持 `off`、`shadow`、`on` 三种模式：
 
-- **会话日志蒸馏**（`distill.auto`）：candidate 质量从确定性规则升级为 LLM 提炼
-- **记忆整合裁决**（consolidation）：重叠区间 draft 的 merge-or-keep 由 LLM 裁决
+- `off`：完全使用确定性路径。
+- `shadow`：确定性结果生效，同时调用 LLM 并记录对比审计。
+- `on`：LLM 为主，失败时回退确定性路径并记录 fallback 审计。
+
+启用 `on` 或 `shadow` 时，脱敏后的会话观察内容可能发送到 `TAGA_LLM_ENDPOINT`。使用本地 Ollama 时数据留在本机；使用云端兼容服务前，请确认服务商的数据处理政策。
+
+后台整合默认关闭。开启后，daemon 可执行 embedding 去重、draft 晋升和重复记忆的 merge-or-keep 裁决；所有自动动作都以 daemon actor 写入审计，并保留人工回滚路径。
+
+## MCP 集成
+
+`taga-mcp` 是基于 stdin/stdout 的 JSON Lines MCP server：每行接收一个 JSON-RPC 请求，每行输出一个 JSON-RPC 响应。它与 CLI 使用同一套配置解析和 Brain 数据。
 
 ```bash
-TAGA_LLM_MODE=off            # off（默认）| shadow | on
-TAGA_LLM_ENDPOINT=           # OpenAI 兼容地址，如 http://127.0.0.1:11434/v1/chat/completions（Ollama）
-TAGA_LLM_API_KEY=
-TAGA_LLM_MODEL=
-TAGA_LLM_TIMEOUT_MS=30000
-TAGA_LLM_PROVIDER_NAME=openai-compatible
+taga-mcp
 ```
 
-| 模式 | 行为 |
-|---|---|
-| `off` | 不调用 LLM，蒸馏与整合全部走确定性路径 |
-| `shadow` | 确定性结果照旧生效；LLM 双跑，对比结果写 `distill.llm_shadow` 审计事件——用于上线前评估质量 |
-| `on` | LLM 为主，失败自动回退确定性路径并写 `distill.llm_fallback` 审计；consolidation 裁决启用 |
+主要工具包括：
 
-**隐私提示**：`TAGA_LLM_MODE=on/shadow` 时，脱敏后的会话观察内容会发送到 `TAGA_LLM_ENDPOINT`。指向本地 Ollama 时数据不出机器；指向云端服务时请自行确认该端点的数据处理政策。发送前不做额外变换，行为可预测。
+- `memory_search`、`memory_get`、`memory_record`、`memory_feedback`
+- `memory_session_start`、`memory_session_observation`、`memory_timeline`
+- `context_trace`、`memory_precheck`
+- `brain_tree`、`brain_list`、`brain_summary`、`brain_detail`、`brain_rebuild`
+- `knowledge_ingest`
 
-candidate 的 model trace（provider/model/mode/tokens/latency）与审计事件共同构成 LLM 调用的完整可观测性。
-
-## 可选 Reranker
-
-Taga 支持 Transformers.js 可加载的 `bge-reranker-v2-m3` ONNX 模型：
-
-```powershell
-$env:TAGA_RERANKER_MODEL_PATH = "D:\models\Xenova\bge-reranker-v2-m3"
-$env:TAGA_RERANK_MODE = "on"
-$env:TAGA_RERANK_TOP_K = "10"
-$env:TAGA_RERANK_TIMEOUT_MS = "1500"
-```
-
-模型目录应包含：
-
-```text
-bge-reranker-v2-m3/
-  config.json
-  tokenizer.json
-  tokenizer_config.json
-  onnx/
-    model.onnx
-    model.onnx_data
-```
-
-当前 CPU 评测显示 reranker 能改善 Top-1 和排序质量，但延迟明显高于 equal-RRF，因此默认保持关闭。建议仅用于 shadow、离线评测、较小 `topK`，或具备硬件加速和缓存的部署。
-
-## MCP
-
-`taga-mcp` 从 stdin 接收一行一个 JSON 请求，并向 stdout 返回一行一个 JSON 响应。Brain 路径来自统一配置，也可通过 `TAGA_BRAIN` 临时覆盖；配置文件可通过 `TAGA_CONFIG` 指定。
-
-已实现的主要工具包括：
-
-- `memory_search`
-- `memory_get`
-- `memory_record`
-- `memory_feedback`
-- `memory_precheck`
-- `memory_timeline`
-- `memory_session_start`
-- `memory_session_observation`
-
-启动入口：
-
-```bash
-node dist/apps/mcp/src/main.js
-```
+Agent 宿主需要在自己的 MCP 配置中把启动命令指向 `taga-mcp`；路径和模型等运行参数通过 Taga 的 `config.yaml` 或环境变量管理，不在工具请求中重复传递。
 
 ## Daemon
 
-前台运行：
+前台运行适合开发和排障：
 
 ```bash
-node dist/apps/cli/src/main.js daemon run --brain=./brain
+taga daemon run --brain=./brain
 ```
 
-后台生命周期：
+后台生命周期管理：
 
 ```bash
-node dist/apps/cli/src/main.js daemon start --brain=./brain
-node dist/apps/cli/src/main.js daemon status --brain=./brain
-node dist/apps/cli/src/main.js daemon restart --brain=./brain
-node dist/apps/cli/src/main.js daemon stop --brain=./brain
+taga daemon start --brain=./brain
+taga daemon status --brain=./brain
+taga daemon restart --brain=./brain
+taga daemon stop --brain=./brain
 ```
 
-Linux systemd user service 和 macOS launchd 的说明位于 `packaging/`。Windows 当前使用 Taga 自己的后台进程生命周期管理。
-
-## 验证
+Linux 和 macOS 可以安装用户级服务：
 
 ```bash
+taga daemon install --brain="$HOME/.taga/brain"
+taga daemon uninstall
+```
+
+服务安装和卸载只管理 systemd/launchd 单元，不会删除 Brain 数据。详细说明见 [`packaging/systemd/README.md`](packaging/systemd/README.md) 和 [`packaging/launchd/README.md`](packaging/launchd/README.md)。
+
+## 数据、安全与恢复
+
+- Markdown 是记忆事实源；SQLite、FTS5 和向量索引可以通过 `reindex` 重建。
+- candidate/draft 默认不进入普通召回；显式 `include-draft` 的结果会标记并降权。
+- 敏感值不应写入 Markdown、SQLite payload、日志、MCP 错误或测试 fixture。
+- 遗忘、active 记忆改写和其他高风险操作需要显式确认。
+- `doctor` 用于检查本地运行环境；`memory timeline`、审计记录和 Context trace 用于追踪记忆如何产生和被使用。
+- LLM 调用会记录 provider、model、mode、tokens 和 latency 等 model trace，但不会把 API Key 持久化到配置文件。
+
+## 开发与测试
+
+```bash
+pnpm install --frozen-lockfile
 pnpm run build
 pnpm run lint
 pnpm run test
 ```
 
-严格语义评测：
+CI 使用不包含 benchmark 的测试集，性能基线单独运行：
+
+```bash
+pnpm run test:ci
+pnpm run test:benchmark
+```
+
+需要本地模型时，可以运行严格语义评测：
 
 ```bash
 TAGA_BGE_M3_MODEL_PATH=/path/to/Xenova/bge-m3 pnpm run evaluate:semantic:strict
 ```
 
-启用 reranker 的评测：
+主要目录：
 
-```bash
-TAGA_BGE_M3_MODEL_PATH=/path/to/Xenova/bge-m3 \
-TAGA_RERANKER_MODEL_PATH=/path/to/Xenova/bge-reranker-v2-m3 \
-node scripts/evaluate-semantic.mjs --suite=strict-300 --rerank-top-k=10
+```text
+apps/cli                CLI 入口
+apps/mcp                JSON Lines MCP server
+apps/daemon             会话采集、语义索引和后台整合
+packages/config         schema v3、配置分层和迁移
+packages/domain         Memory 领域模型与契约
+packages/storage        Markdown、SQLite、迁移和审计
+packages/retrieval      FTS5、RRF 和语义检索融合
+packages/embedding      Transformers.js 本地 embedding
+packages/semantic-index Zvec 索引和语义检索
+packages/session        Session Context Pack 和 timeline
+tests/                  单元、集成、发布和性能测试
+scripts/                npm 打包、发布校验和语义评测
+packaging/              systemd/launchd 服务模板
 ```
 
-最近一次本地 strict-300 reranker 结果：
+## 发布
 
-| 指标 | 结果 |
-| --- | ---: |
-| Recall@10 | 0.8400 |
-| Precision@5 | 0.4620 |
-| Hit@1 | 0.9967 |
-| MRR | 0.9983 |
-| nDCG@10 | 0.8233 |
-| MAP@10 | 0.7228 |
-| Hybrid p95（CPU） | 14.6 s |
-| Governance leaks | 0 |
+发布版本由 `v<package.json.version>` tag 驱动。发布前会执行 build、lint、隔离测试、benchmark 和真实 npm 临时安装冒烟验证，最后发布包含 `taga` 与 `taga-mcp` 两个 bin 的 npm 包。
 
-这组数据来自确定性、脱敏的 300 条压力测试，不等价于独立人工标注或生产查询日志。完整报告位于 `release/m4-semantic-evaluation-strict-300-win32-x64.json`。
+本地检查发布包：
 
-## 当前状态与限制
+```bash
+pnpm run release:package
+pnpm run release:smoke
+pnpm run release:verify
+```
 
-- Fast Path、治理、CLI、MCP、daemon、session workflow 和可选语义检索已经具备可运行实现。
-- 默认检索仍推荐 equal-RRF；CPU cross-encoder reranker 暂不适合默认在线启用。
-- 模型权重不会提交到仓库，需要用户自行准备本地模型。
-- 这是 `0.1.0` 开发版本，配置、命令和存储格式仍可能变化。
-- 当前仓库尚未声明开源许可证；在许可证补充前，保留所有权利。
+正式发布需要 GitHub Actions 中配置 `NPM_TOKEN` secret，且 tag 必须严格匹配 `package.json` 版本。发布门禁和证据记录见 [`release/README.md`](release/README.md)。
 
-## 安全原则
+## 项目状态
 
-- 敏感值不得写入 Markdown、SQLite payload、日志、MCP 错误或测试 fixture。
-- 未确认的 candidate/draft 不进入默认召回和静态 Context Pack；显式 `include_draft` 的搜索结果带未验证标记并降权。
-- 高风险行为不得在没有单独授权的情况下自动执行；自动晋升仅限 draft → active，遗忘与改写 active 记忆始终需要人工确认。
-- 所有写入、生命周期变化、召回、注入、反馈和遗忘操作都应可审计；自动转正以 `actor: daemon` 落审计并可人工回滚。
+当前已具备：
+
+- 本地 Markdown Brain、SQLite/FTS5 检索和审计存储
+- Memory 生命周期、反馈、恢复和治理流程
+- Context Pack、session timeline 和 Agent 适配器
+- CLI、MCP server、daemon 和跨平台服务模板
+- 可选 BGE-M3/Zvec 语义检索、LLM shadow/on 和自动整合
+- 配置 schema v3、分层优先级、旧版配置迁移和发布验证
+
+当前限制：
+
+- 语义模型权重不会提交到仓库，需要使用者自行准备本地模型。
+- `0.1.0` 仍属于开发版本，公共 API、配置和存储格式不承诺长期稳定。
+
+## 贡献
+
+行为变更遵循仓库中的 minispec 流程：先更新项目契约和变更卡，再实现、检查、分析和归档。提交前至少运行：
+
+```bash
+pnpm run build
+pnpm run lint
+pnpm run test:ci
+```
+
+## 许可证
+
+[MIT](LICENSE)
