@@ -96,6 +96,7 @@ describe('M3-07 macOS and launchd', () => {
     };
     const manager = new LaunchdUserServiceManager({
       brainPath: brain,
+      configPath: join(fixture.path, 'config with spaces.yaml'),
       daemonEntryPath: '/Applications/Taga/daemon main.js',
       nodePath: '/usr/local/bin/node',
       homeDirectory: fixture.path,
@@ -105,7 +106,9 @@ describe('M3-07 macOS and launchd', () => {
     expect(platformPaths({ HOME: '/Users/tester' }, 'darwin')).toMatchObject({ platform: 'macos', brainPath: '/Users/tester/.taga/brain', launchdUserDirectory: '/Users/tester/Library/LaunchAgents' });
     expect((await manager.install()).active).toBe(true);
     expect((await manager.install()).active).toBe(true);
-    expect(await readFile(manager.plistPath, 'utf8')).toContain('com.taga.daemon');
+    const plist = await readFile(manager.plistPath, 'utf8');
+    expect(plist).toContain('com.taga.daemon');
+    expect(plist).toContain('--config=');
     expect(renderLaunchdPlist('com.taga.daemon', '/usr/bin/node', '/tmp/a&b.js', brain)).toContain('a&amp;b.js');
     expect((await manager.stop()).active).toBe(false);
     expect((await manager.start()).active).toBe(true);

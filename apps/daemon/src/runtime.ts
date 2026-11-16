@@ -12,7 +12,8 @@ import {
   type LearnInput,
 } from '../../../packages/learning/src/index.js';
 import { MetricsService } from '../../../packages/metrics/src/index.js';
-import { SqliteAuditLog, resolveLlmConfig, resolveSemanticConfig, type ConfigFileV2 } from '../../../packages/application/src/index.js';
+import { SqliteAuditLog, type ConsolidationConfig, type LlmConfig } from '../../../packages/application/src/index.js';
+import type { ResolvedConfig } from '../../../packages/config/src/index.js';
 import { AutomaticDistillationService } from '../../../packages/distillation/src/index.js';
 import { NotificationService } from '../../../packages/notifications/src/index.js';
 import { MarkdownMemoryRepository } from '../../../packages/storage/src/index.js';
@@ -179,14 +180,21 @@ export class DaemonRuntime {
   }
 }
 
-export function defaultJobHandlers(brainPath: string, database: DatabaseStore, file?: ConfigFileV2): ReadonlyMap<string, DaemonJobHandler> {
+export function defaultJobHandlers(brainPath: string, database: DatabaseStore, config: ResolvedConfig): ReadonlyMap<string, DaemonJobHandler> {
   const audit = new SqliteAuditLog(database);
   const notifications = new NotificationService(database, audit);
-  const semantic = resolveSemanticConfig(process.env, file?.semantic);
-  const duplicateChecker = createSemanticDuplicateChecker(brainPath, { modelPath: semantic.modelPath });
+  const llm = resolvedLlmConfig(config);
+  const reflectConfig = {
+    mode: config.reflection.enabled ? 'on' as const : 'off' as const,
+    intervalMs: config.reflection.intervalMs,
+    windowDays: config.reflection.windowDays,
+    minGroupSize: config.reflection.minGroupSize,
+    maxGroups: config.reflection.maxGroups,
+  };
+  const duplicateChecker = createSemanticDuplicateChecker(brainPath, { modelPath: config.retrieval.semantic.modelPath });
   return new Map<string, DaemonJobHandler>([
-    ...semanticJobHandlers(brainPath, database),
-    ...consolidationJobHandlers(brainPath, database, { notifications }),
+    ...semanticJobHandlers(brainPath, database, config.retrieval.semantic.modelPath),
+    ...consolidationJobHandlers(brainPath, database, resolvedConsolidationConfig(config), config.retrieval.semantic.modelPath, { notifications }),
     ['reindex', async () => {
       await new RecoveryService(brainPath, database).reindex();
     }],
@@ -204,7 +212,7 @@ export function defaultJobHandlers(brainPath: string, database: DatabaseStore, f
       }, { brainPath, audit });
     }],
     [REFLECT_JOB_KIND, async () => {
-      const report = await runReflect({}, { brainPath, audit, llm: resolveLlmConfig(process.env, file?.llm) });
+      const report = await runReflect({}, { brainPath, audit, llm, config: reflectConfig });
       if (report.candidates > 0) {
         await notifications.enqueue({
           level: 'L1',
@@ -241,7 +249,7 @@ export function defaultJobHandlers(brainPath: string, database: DatabaseStore, f
       const payload = JSON.parse(job.payload) as { projectId?: string; sessionId?: string };
       await new AutomaticDistillationService(
         database,
-        buildDistillerChain({ audit, llm: resolveLlmConfig(process.env, file?.llm) }),
+        buildDistillerChain({ audit, llm }),
         undefined,
         {
           audit,
@@ -254,6 +262,37 @@ export function defaultJobHandlers(brainPath: string, database: DatabaseStore, f
       ).run(payload);
     }],
   ]);
+}
+
+export function resolvedLlmConfig(config: ResolvedConfig): LlmConfig {
+  return {
+    mode: config.llm.mode,
+    endpoint: config.llm.endpoint,
+    model: config.llm.model,
+    timeoutMs: config.llm.timeoutMs,
+    providerName: config.llm.provider,
+    ...(config.llm.apiKey === undefined ? {} : { apiKey: config.llm.apiKey }),
+    ...(config.llm.dailyCap === undefined ? {} : { dailyCap: config.llm.dailyCap }),
+  };
+}
+
+export function resolvedConsolidationConfig(config: ResolvedConfig): ConsolidationConfig {
+  const llm = resolvedLlmConfig(config);
+  return {
+    enabled: config.consolidation.enabled,
+    minUsefulCount: config.consolidation.promotion.minUsefulCount,
+    maxNotUsefulCount: config.consolidation.promotion.maxNotUsefulCount,
+    rejectSimilarity: config.consolidation.deduplication.rejectSimilarity,
+    mergeSimilarity: config.consolidation.deduplication.mergeSimilarity,
+    scanIntervalMs: config.consolidation.scanIntervalMs,
+    llm: llm.mode !== 'on' ? undefined : {
+      endpoint: llm.endpoint,
+      model: llm.model,
+      timeoutMs: llm.timeoutMs,
+      ...(llm.apiKey === undefined ? {} : { apiKey: llm.apiKey }),
+      ...(llm.dailyCap === undefined ? {} : { dailyCap: llm.dailyCap }),
+    },
+  };
 }
 
 function safeError(error: unknown): string {

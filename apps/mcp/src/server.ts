@@ -33,6 +33,8 @@ import { parseMemory, type Memory } from '../../../packages/domain/src/index.js'
 import { NotificationService } from '../../../packages/notifications/src/index.js';
 import { MemoryPrecheckService } from '../../../packages/precheck/src/index.js';
 import { SessionContextService, observationContentHash } from '../../../packages/session/src/index.js';
+import { AgentAdapterRegistry } from '../../../packages/adapters/src/index.js';
+import { createDefaultConfig, type ResolvedConfig } from '../../../packages/config/src/index.js';
 
 const searchInputSchema = z.object({
   query: z.string().min(1),
@@ -270,7 +272,11 @@ export class LiteMcpServer {
   private semanticEmbedder: Embedder | undefined;
   private reranker: Reranker | undefined;
 
-  constructor(private readonly brainPath: string, private readonly clock: () => Date = () => new Date()) {}
+  constructor(
+    private readonly brainPath: string,
+    private readonly clock: () => Date = () => new Date(),
+    private readonly config: ResolvedConfig = createDefaultConfig(process.cwd(), brainPath),
+  ) {}
 
   close(): void {
     this.semanticIndex?.close();
@@ -446,9 +452,9 @@ export class LiteMcpServer {
     try {
       const provider = new FtsRetrievalProvider(database);
       const catalog = new Map((await this.readMemoryFiles()).map((item) => [item.memory.id, item.memory]));
-      const mode = parsed.semantic_mode ?? process.env.TAGA_SEMANTIC_MODE ?? 'off';
-      const rerankMode = parsed.rerank_mode ?? process.env.TAGA_RERANK_MODE ?? 'off';
-      const rerankTopK = parsed.rerank_top_k ?? Number(process.env.TAGA_RERANK_TOP_K ?? 30);
+      const mode = parsed.semantic_mode ?? this.config.retrieval.semantic.mode;
+      const rerankMode = parsed.rerank_mode ?? this.config.retrieval.rerank.mode;
+      const rerankTopK = parsed.rerank_top_k ?? this.config.retrieval.rerank.topK;
       const searchInput = {
         query: parsed.query,
         ...(parsed.project_id === undefined ? {} : { scope: { kind: 'project' as const, id: parsed.project_id } }),
@@ -474,7 +480,7 @@ export class LiteMcpServer {
         retrieval = await provider.searchHybrid(
           searchInput,
           semantic,
-          reranker === undefined ? {} : { reranker, rerankTopK, rerankTimeoutMs: Number(process.env.TAGA_RERANK_TIMEOUT_MS ?? 350) },
+          reranker === undefined ? {} : { reranker, rerankTopK, rerankTimeoutMs: this.config.retrieval.rerank.timeoutMs },
         );
       }
       const filtered = parsed.type === undefined
@@ -569,7 +575,7 @@ export class LiteMcpServer {
 
   private semanticRetriever(database: DatabaseStore): SemanticRetriever {
     this.semanticIndex ??= new ZvecMemoryIndex(join(this.brainPath, '.taga', 'semantic'));
-    this.semanticEmbedder ??= createLocalBgeM3Embedder({ modelPath: process.env.TAGA_BGE_M3_MODEL_PATH ?? '', batchSize: 4 });
+    this.semanticEmbedder ??= createLocalBgeM3Embedder({ modelPath: this.config.retrieval.semantic.modelPath, batchSize: 4 });
     return new ZvecSemanticRetriever({
       database,
       index: this.semanticIndex,
@@ -578,11 +584,11 @@ export class LiteMcpServer {
   }
 
   private crossEncoderReranker(): Reranker | undefined {
-    const modelPath = process.env.TAGA_RERANKER_MODEL_PATH;
-    if (modelPath === undefined || modelPath.length === 0) return undefined;
+    const modelPath = this.config.retrieval.rerank.modelPath;
+    if (modelPath.length === 0) return undefined;
     this.reranker ??= createLocalCrossEncoderReranker({
       modelPath,
-      ...(process.env.TAGA_RERANKER_MODEL_ID === undefined ? {} : { modelId: process.env.TAGA_RERANKER_MODEL_ID }),
+      ...(this.config.retrieval.rerank.modelId.length === 0 ? {} : { modelId: this.config.retrieval.rerank.modelId }),
     });
     return this.reranker;
   }
@@ -929,22 +935,22 @@ export class LiteMcpServer {
   }
 
   private async injectionStatus(memory: Memory): Promise<'injected' | 'not_injected' | 'unknown'> {
-    try {
-      const config = await readFile(join(this.brainPath, '_config.yaml'), 'utf8');
-      const targets = [...config.matchAll(/targetPath:\s*(.+)/gu)].map((match) => match[1]?.trim()).filter((path): path is string => path !== undefined);
-      if (targets.length === 0) return 'unknown';
-      for (const target of targets) {
-        try {
-          const content = await readFile(target, 'utf8');
-          if (content.includes(markerBegin) && content.includes(markerEnd) && content.includes(memory.title)) return 'injected';
-        } catch {
-          continue;
-        }
+    const registry = new AgentAdapterRegistry();
+    const targets = this.config.agents.enabled.flatMap((configuredId) => {
+      const id = configuredId === 'claude' ? 'claude-code' : configuredId;
+      return registry.get(id)?.staticTargets(this.config.paths.project)
+        ?? [join(this.config.paths.project, id === 'claude-code' ? 'CLAUDE.md' : 'AGENTS.md')];
+    });
+    if (targets.length === 0) return 'unknown';
+    for (const target of targets) {
+      try {
+        const content = await readFile(target, 'utf8');
+        if (content.includes(markerBegin) && content.includes(markerEnd) && content.includes(memory.title)) return 'injected';
+      } catch {
+        continue;
       }
-      return 'not_injected';
-    } catch {
-      return 'unknown';
     }
+    return 'not_injected';
   }
 }
 

@@ -40,6 +40,7 @@ export interface ServiceStatus {
 
 export interface SystemdServiceOptions {
   readonly brainPath: string;
+  readonly configPath?: string;
   readonly daemonEntryPath: string;
   readonly nodePath?: string;
   readonly homeDirectory?: string;
@@ -50,6 +51,7 @@ export interface SystemdServiceOptions {
 
 export interface LaunchdServiceOptions {
   readonly brainPath: string;
+  readonly configPath?: string;
   readonly daemonEntryPath: string;
   readonly nodePath?: string;
   readonly homeDirectory?: string;
@@ -126,7 +128,7 @@ export class SystemdUserServiceManager {
 
   async install(): Promise<ServiceStatus> {
     await ensurePrivateDirectory(dirname(this.unitPath));
-    await atomicPrivateWrite(this.unitPath, renderSystemdUnit(this.nodePath, this.options.daemonEntryPath, this.options.brainPath));
+    await atomicPrivateWrite(this.unitPath, renderSystemdUnit(this.nodePath, this.options.daemonEntryPath, this.options.brainPath, this.options.configPath));
     await this.runner('systemctl', ['--user', 'daemon-reload']);
     await this.runner('systemctl', ['--user', 'enable', '--now', this.unitName]);
     return this.status();
@@ -200,7 +202,7 @@ export class LaunchdUserServiceManager {
 
   async install(): Promise<ServiceStatus> {
     await ensurePrivateDirectory(dirname(this.plistPath));
-    await atomicPrivateWrite(this.plistPath, renderLaunchdPlist(this.label, this.nodePath, this.options.daemonEntryPath, this.options.brainPath));
+    await atomicPrivateWrite(this.plistPath, renderLaunchdPlist(this.label, this.nodePath, this.options.daemonEntryPath, this.options.brainPath, this.options.configPath));
     await this.runner('launchctl', ['bootout', this.domain, this.plistPath]).catch(() => ({ stdout: '', stderr: '' }));
     await this.runner('launchctl', ['bootstrap', this.domain, this.plistPath]);
     await this.runner('launchctl', ['enable', this.serviceTarget()]);
@@ -304,12 +306,13 @@ export async function platformHealth(brainPath: string, platform: NodeJS.Platfor
   return checks;
 }
 
-export function renderSystemdUnit(nodePath: string, daemonEntryPath: string, brainPath: string): string {
-  return `[Unit]\nDescription=Taga local knowledge daemon\nAfter=default.target\n\n[Service]\nType=simple\nExecStart=${systemdQuote(nodePath)} ${systemdQuote(daemonEntryPath)} ${systemdQuote(`--brain=${brainPath}`)}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nUMask=0077\n\n[Install]\nWantedBy=default.target\n`;
+export function renderSystemdUnit(nodePath: string, daemonEntryPath: string, brainPath: string, configPath?: string): string {
+  const argumentsList = [`--brain=${brainPath}`, ...(configPath === undefined ? [] : [`--config=${configPath}`])].map(systemdQuote).join(' ');
+  return `[Unit]\nDescription=Taga local knowledge daemon\nAfter=default.target\n\n[Service]\nType=simple\nExecStart=${systemdQuote(nodePath)} ${systemdQuote(daemonEntryPath)} ${argumentsList}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nUMask=0077\n\n[Install]\nWantedBy=default.target\n`;
 }
 
-export function renderLaunchdPlist(label: string, nodePath: string, daemonEntryPath: string, brainPath: string): string {
-  const argumentsList = [nodePath, daemonEntryPath, `--brain=${brainPath}`]
+export function renderLaunchdPlist(label: string, nodePath: string, daemonEntryPath: string, brainPath: string, configPath?: string): string {
+  const argumentsList = [nodePath, daemonEntryPath, `--brain=${brainPath}`, ...(configPath === undefined ? [] : [`--config=${configPath}`])]
     .map((value) => `    <string>${xmlEscape(value)}</string>`)
     .join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>

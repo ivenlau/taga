@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import { createInterface } from 'node:readline';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { loadConfig } from '../../../packages/config/src/index.js';
 import { LiteMcpServer } from './server.js';
 
-const server = new LiteMcpServer(join(process.env.TAGA_BRAIN ?? join(homedir(), '.taga', 'brain')));
+const requestedBrain = process.env.TAGA_BRAIN;
+const loadedConfig = await loadConfig({
+  ...(requestedBrain === undefined ? {} : { isolatedBrainPath: requestedBrain, overrides: { paths: { brain: requestedBrain } } }),
+});
+const server = new LiteMcpServer(loadedConfig.config.paths.brain, () => new Date(), loadedConfig.config);
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
 try {
   for await (const line of input) {

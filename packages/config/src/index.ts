@@ -1,0 +1,601 @@
+import { homedir } from 'node:os';
+import { readFile } from 'node:fs/promises';
+import { dirname, isAbsolute, join, posix, resolve, win32 } from 'node:path';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { z } from 'zod';
+
+export type FeatureMode = 'off' | 'shadow' | 'on';
+export type ConfigSource = 'override' | 'environment' | 'file' | 'default';
+
+const featureModeSchema = z.enum(['off', 'shadow', 'on']);
+const nonEmptyString = z.string().min(1);
+
+const pathsFileSchema = z.object({
+  brain: nonEmptyString.optional(),
+  project: nonEmptyString.optional(),
+}).strict();
+
+const agentsFileSchema = z.object({
+  enabled: z.array(nonEmptyString).optional(),
+  writeInstructions: z.boolean().optional(),
+}).strict();
+
+const semanticFileSchema = z.object({
+  mode: featureModeSchema.optional(),
+  modelPath: nonEmptyString.optional(),
+}).strict();
+
+const rerankFileSchema = z.object({
+  mode: featureModeSchema.optional(),
+  modelPath: nonEmptyString.optional(),
+  modelId: nonEmptyString.optional(),
+  topK: z.number().int().positive().max(100).optional(),
+  timeoutMs: z.number().int().positive().optional(),
+}).strict();
+
+const retrievalFileSchema = z.object({
+  semantic: semanticFileSchema.optional(),
+  rerank: rerankFileSchema.optional(),
+}).strict();
+
+const llmFileSchema = z.object({
+  mode: featureModeSchema.optional(),
+  provider: nonEmptyString.optional(),
+  endpoint: nonEmptyString.optional(),
+  model: nonEmptyString.optional(),
+  timeoutMs: z.number().int().positive().optional(),
+  dailyCap: z.number().int().positive().optional(),
+}).strict();
+
+const promotionFileSchema = z.object({
+  minUsefulCount: z.number().int().positive().optional(),
+  maxNotUsefulCount: z.number().int().positive().optional(),
+}).strict();
+
+const deduplicationFileSchema = z.object({
+  rejectSimilarity: z.number().min(0).max(1).optional(),
+  mergeSimilarity: z.number().min(0).max(1).optional(),
+}).strict();
+
+const consolidationFileSchema = z.object({
+  enabled: z.boolean().optional(),
+  scanIntervalMs: z.number().int().positive().optional(),
+  promotion: promotionFileSchema.optional(),
+  deduplication: deduplicationFileSchema.optional(),
+}).strict();
+
+const learningFileSchema = z.object({
+  allowNetwork: z.boolean().optional(),
+}).strict();
+
+const reflectionFileSchema = z.object({
+  enabled: z.boolean().optional(),
+  intervalMs: z.number().int().positive().optional(),
+  windowDays: z.number().int().positive().optional(),
+  minGroupSize: z.number().int().positive().optional(),
+  maxGroups: z.number().int().positive().optional(),
+}).strict();
+
+export const configFileV3Schema = z.object({
+  schemaVersion: z.literal(3),
+  paths: pathsFileSchema.optional(),
+  agents: agentsFileSchema.optional(),
+  retrieval: retrievalFileSchema.optional(),
+  llm: llmFileSchema.optional(),
+  consolidation: consolidationFileSchema.optional(),
+  learning: learningFileSchema.optional(),
+  reflection: reflectionFileSchema.optional(),
+}).strict();
+
+export type ConfigFileV3 = z.infer<typeof configFileV3Schema>;
+
+const legacyAgentSchema = z.object({
+  id: nonEmptyString,
+  kind: nonEmptyString.optional(),
+  configPath: nonEmptyString.optional(),
+  targetPath: nonEmptyString.optional(),
+  targetPaths: z.array(nonEmptyString).optional(),
+}).passthrough();
+
+const legacyLlmSchema = z.object({
+  mode: featureModeSchema.optional(),
+  endpoint: nonEmptyString.optional(),
+  apiKey: nonEmptyString.optional(),
+  model: nonEmptyString.optional(),
+  timeoutMs: z.number().int().positive().optional(),
+  providerName: nonEmptyString.optional(),
+  dailyCap: z.number().int().positive().optional(),
+}).passthrough();
+
+const legacyConfigSchema = z.object({
+  schemaVersion: z.union([z.literal(1), z.literal(2)]),
+  brainPath: nonEmptyString,
+  projectPath: nonEmptyString,
+  projectId: nonEmptyString.optional(),
+  agents: z.array(legacyAgentSchema).default([]),
+  remoteModelAllowed: z.boolean().optional(),
+  semantic: z.object({
+    mode: featureModeSchema.optional(),
+    modelPath: nonEmptyString.optional(),
+    rerankMode: featureModeSchema.optional(),
+  }).passthrough().optional(),
+  consolidation: z.object({
+    mode: z.enum(['off', 'on']).optional(),
+    minUsefulCount: z.number().int().positive().optional(),
+    maxNotUsefulCount: z.number().int().positive().optional(),
+    rejectSimilarity: z.number().min(0).max(1).optional(),
+    mergeSimilarity: z.number().min(0).max(1).optional(),
+    scanIntervalMs: z.number().int().positive().optional(),
+    llm: legacyLlmSchema.optional(),
+  }).passthrough().optional(),
+  learn: z.object({ allowNetwork: z.boolean().optional() }).passthrough().optional(),
+  reflect: z.object({
+    mode: z.enum(['off', 'on']).optional(),
+    intervalMs: z.number().int().positive().optional(),
+    windowDays: z.number().int().positive().optional(),
+    minGroupSize: z.number().int().positive().optional(),
+    maxGroups: z.number().int().positive().optional(),
+  }).passthrough().optional(),
+  llm: legacyLlmSchema.optional(),
+}).passthrough();
+
+export interface ResolvedConfig {
+  readonly schemaVersion: 3;
+  readonly paths: {
+    readonly brain: string;
+    readonly project: string;
+  };
+  readonly agents: {
+    readonly enabled: readonly string[];
+    readonly writeInstructions: boolean;
+  };
+  readonly retrieval: {
+    readonly semantic: {
+      readonly mode: FeatureMode;
+      readonly modelPath: string;
+    };
+    readonly rerank: {
+      readonly mode: FeatureMode;
+      readonly modelPath: string;
+      readonly modelId: string;
+      readonly topK: number;
+      readonly timeoutMs: number;
+    };
+  };
+  readonly llm: {
+    readonly mode: FeatureMode;
+    readonly provider: string;
+    readonly endpoint: string;
+    readonly model: string;
+    readonly timeoutMs: number;
+    readonly dailyCap?: number;
+    readonly apiKey?: string;
+  };
+  readonly consolidation: {
+    readonly enabled: boolean;
+    readonly scanIntervalMs: number;
+    readonly promotion: {
+      readonly minUsefulCount: number;
+      readonly maxNotUsefulCount: number;
+    };
+    readonly deduplication: {
+      readonly rejectSimilarity: number;
+      readonly mergeSimilarity: number;
+    };
+  };
+  readonly learning: {
+    readonly allowNetwork: boolean;
+  };
+  readonly reflection: {
+    readonly enabled: boolean;
+    readonly intervalMs: number;
+    readonly windowDays: number;
+    readonly minGroupSize: number;
+    readonly maxGroups: number;
+  };
+}
+
+export interface ConfigOverrides {
+  readonly paths?: { readonly brain?: string; readonly project?: string };
+  readonly agents?: { readonly enabled?: readonly string[]; readonly writeInstructions?: boolean };
+  readonly retrieval?: {
+    readonly semantic?: { readonly mode?: FeatureMode; readonly modelPath?: string };
+    readonly rerank?: { readonly mode?: FeatureMode; readonly modelPath?: string; readonly modelId?: string; readonly topK?: number; readonly timeoutMs?: number };
+  };
+  readonly llm?: { readonly mode?: FeatureMode; readonly provider?: string; readonly endpoint?: string; readonly model?: string; readonly timeoutMs?: number; readonly dailyCap?: number };
+  readonly consolidation?: {
+    readonly enabled?: boolean;
+    readonly scanIntervalMs?: number;
+    readonly promotion?: { readonly minUsefulCount?: number; readonly maxNotUsefulCount?: number };
+    readonly deduplication?: { readonly rejectSimilarity?: number; readonly mergeSimilarity?: number };
+  };
+  readonly learning?: { readonly allowNetwork?: boolean };
+  readonly reflection?: { readonly enabled?: boolean; readonly intervalMs?: number; readonly windowDays?: number; readonly minGroupSize?: number; readonly maxGroups?: number };
+}
+
+export interface LoadConfigOptions {
+  readonly cwd?: string;
+  readonly env?: NodeJS.ProcessEnv;
+  readonly platform?: NodeJS.Platform;
+  readonly configPath?: string;
+  readonly isolatedBrainPath?: string;
+  readonly overrides?: ConfigOverrides;
+}
+
+export interface LoadedConfig {
+  readonly config: ResolvedConfig;
+  readonly configPath: string;
+  readonly loadedFrom: string | null;
+  readonly legacy: boolean;
+  readonly warnings: readonly string[];
+  readonly sources: Readonly<Record<string, ConfigSource>>;
+  readonly file: ConfigFileV3 | null;
+}
+
+export class ConfigurationError extends Error {
+  constructor(message: string, readonly issues: readonly string[] = []) {
+    super(message);
+    this.name = 'ConfigurationError';
+  }
+}
+
+export function defaultConfigPath(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
+  const home = env.HOME ?? env.USERPROFILE ?? homedir();
+  if (platform === 'win32') return win32.join(env.APPDATA ?? win32.join(home, 'AppData', 'Roaming'), 'taga', 'config.yaml');
+  if (platform === 'darwin') return posix.join(home, 'Library', 'Application Support', 'taga', 'config.yaml');
+  return posix.join(env.XDG_CONFIG_HOME ?? posix.join(home, '.config'), 'taga', 'config.yaml');
+}
+
+export function resolveConfigPath(options: LoadConfigOptions = {}): string {
+  const env = options.env ?? process.env;
+  const cwd = resolve(options.cwd ?? process.cwd());
+  const requested = options.configPath ?? env.TAGA_CONFIG;
+  if (requested !== undefined && requested.length > 0) return resolvePath(cwd, requested);
+  if (options.isolatedBrainPath !== undefined) return join(resolvePath(cwd, options.isolatedBrainPath), 'config.yaml');
+  return defaultConfigPath(env, options.platform ?? process.platform);
+}
+
+export async function loadConfig(options: LoadConfigOptions = {}): Promise<LoadedConfig> {
+  const env = options.env ?? process.env;
+  const cwd = resolve(options.cwd ?? process.cwd());
+  const configPath = resolveConfigPath({ ...options, cwd, env });
+  const defaultBrain = defaultBrainPath(env);
+  const legacyBrain = resolvePath(cwd, options.isolatedBrainPath ?? env.TAGA_BRAIN ?? defaultBrain);
+  const legacyPath = join(legacyBrain, '_config.yaml');
+  const primary = await readOptional(configPath);
+  const legacyRaw = primary === null ? await readOptional(legacyPath) : null;
+  const loadedFrom = primary === null ? (legacyRaw === null ? null : legacyPath) : configPath;
+  const parsed = parseConfigText(primary ?? legacyRaw, loadedFrom ?? 'configuration');
+  const defaults = createDefaultConfig(cwd, defaultBrain);
+  const resolved = resolveLayers(defaults, parsed.file, env, options.overrides ?? {}, cwd, loadedFrom === null ? cwd : dirname(loadedFrom));
+  validateResolved(resolved.config);
+  return {
+    config: resolved.config,
+    configPath,
+    loadedFrom,
+    legacy: parsed.legacy,
+    warnings: parsed.warnings,
+    sources: resolved.sources,
+    file: parsed.file,
+  };
+}
+
+export function parseConfigText(raw: string | null, source = 'configuration'): { readonly file: ConfigFileV3 | null; readonly legacy: boolean; readonly warnings: readonly string[] } {
+  if (raw === null) return { file: null, legacy: false, warnings: [] };
+  let value: unknown;
+  try {
+    value = parseYaml(raw);
+  } catch (error) {
+    throw new ConfigurationError(`${source} is not valid YAML`, [error instanceof Error ? error.message : String(error)]);
+  }
+  const v3 = configFileV3Schema.safeParse(value);
+  if (v3.success) return { file: v3.data, legacy: false, warnings: [] };
+  const legacy = legacyConfigSchema.safeParse(value);
+  if (legacy.success) {
+    const migrated = migrateLegacyConfig(legacy.data);
+    return { file: migrated.file, legacy: true, warnings: migrated.warnings };
+  }
+  throw new ConfigurationError(`${source} failed configuration validation`, formatIssues(v3.error));
+}
+
+export function migrateLegacyConfig(legacy: z.infer<typeof legacyConfigSchema>): { readonly file: ConfigFileV3; readonly warnings: readonly string[] } {
+  const warnings = [`schemaVersion ${legacy.schemaVersion} is deprecated; run taga config migrate --write`];
+  const legacyLlm = legacy.llm ?? legacy.consolidation?.llm;
+  if (legacy.llm?.apiKey !== undefined || legacy.consolidation?.llm?.apiKey !== undefined) {
+    warnings.push('legacy llm.apiKey was ignored; set TAGA_LLM_API_KEY instead');
+  }
+  if (legacy.consolidation?.llm !== undefined) {
+    warnings.push(legacy.llm === undefined
+      ? 'legacy consolidation.llm was moved to llm'
+      : 'legacy consolidation.llm was ignored because top-level llm takes precedence');
+  }
+  if (legacy.remoteModelAllowed !== undefined) warnings.push('legacy remoteModelAllowed is no longer used');
+  return {
+    file: {
+      schemaVersion: 3,
+      paths: { brain: legacy.brainPath, project: legacy.projectPath },
+      agents: { enabled: legacy.agents.map((agent) => agent.id), writeInstructions: true },
+      retrieval: {
+        semantic: {
+          ...(legacy.semantic?.mode === undefined ? {} : { mode: legacy.semantic.mode }),
+          ...(legacy.semantic?.modelPath === undefined ? {} : { modelPath: legacy.semantic.modelPath }),
+        },
+        rerank: legacy.semantic?.rerankMode === undefined ? {} : { mode: legacy.semantic.rerankMode },
+      },
+      ...(legacyLlm === undefined ? {} : {
+        llm: {
+          ...(legacyLlm.mode === undefined ? {} : { mode: legacyLlm.mode }),
+          ...(legacyLlm.providerName === undefined ? {} : { provider: legacyLlm.providerName }),
+          ...(legacyLlm.endpoint === undefined ? {} : { endpoint: legacyLlm.endpoint }),
+          ...(legacyLlm.model === undefined ? {} : { model: legacyLlm.model }),
+          ...(legacyLlm.timeoutMs === undefined ? {} : { timeoutMs: legacyLlm.timeoutMs }),
+          ...(legacyLlm.dailyCap === undefined ? {} : { dailyCap: legacyLlm.dailyCap }),
+        },
+      }),
+      ...(legacy.consolidation === undefined ? {} : {
+        consolidation: {
+          ...(legacy.consolidation.mode === undefined ? {} : { enabled: legacy.consolidation.mode === 'on' }),
+          ...(legacy.consolidation.scanIntervalMs === undefined ? {} : { scanIntervalMs: legacy.consolidation.scanIntervalMs }),
+          promotion: {
+            ...(legacy.consolidation.minUsefulCount === undefined ? {} : { minUsefulCount: legacy.consolidation.minUsefulCount }),
+            ...(legacy.consolidation.maxNotUsefulCount === undefined ? {} : { maxNotUsefulCount: legacy.consolidation.maxNotUsefulCount }),
+          },
+          deduplication: {
+            ...(legacy.consolidation.rejectSimilarity === undefined ? {} : { rejectSimilarity: legacy.consolidation.rejectSimilarity }),
+            ...(legacy.consolidation.mergeSimilarity === undefined ? {} : { mergeSimilarity: legacy.consolidation.mergeSimilarity }),
+          },
+        },
+      }),
+      ...(legacy.learn === undefined ? {} : { learning: { ...(legacy.learn.allowNetwork === undefined ? {} : { allowNetwork: legacy.learn.allowNetwork }) } }),
+      ...(legacy.reflect === undefined ? {} : {
+        reflection: {
+          ...(legacy.reflect.mode === undefined ? {} : { enabled: legacy.reflect.mode === 'on' }),
+          ...(legacy.reflect.intervalMs === undefined ? {} : { intervalMs: legacy.reflect.intervalMs }),
+          ...(legacy.reflect.windowDays === undefined ? {} : { windowDays: legacy.reflect.windowDays }),
+          ...(legacy.reflect.minGroupSize === undefined ? {} : { minGroupSize: legacy.reflect.minGroupSize }),
+          ...(legacy.reflect.maxGroups === undefined ? {} : { maxGroups: legacy.reflect.maxGroups }),
+        },
+      }),
+    },
+    warnings,
+  };
+}
+
+export function configFileFromResolved(config: ResolvedConfig): ConfigFileV3 {
+  return {
+    schemaVersion: 3,
+    paths: { brain: config.paths.brain, project: config.paths.project },
+    agents: { enabled: [...config.agents.enabled], writeInstructions: config.agents.writeInstructions },
+    retrieval: {
+      semantic: { mode: config.retrieval.semantic.mode, ...(config.retrieval.semantic.modelPath.length === 0 ? {} : { modelPath: config.retrieval.semantic.modelPath }) },
+      rerank: {
+        mode: config.retrieval.rerank.mode,
+        ...(config.retrieval.rerank.modelPath.length === 0 ? {} : { modelPath: config.retrieval.rerank.modelPath }),
+        ...(config.retrieval.rerank.modelId.length === 0 ? {} : { modelId: config.retrieval.rerank.modelId }),
+        topK: config.retrieval.rerank.topK,
+        timeoutMs: config.retrieval.rerank.timeoutMs,
+      },
+    },
+    llm: {
+      mode: config.llm.mode,
+      provider: config.llm.provider,
+      ...(config.llm.endpoint.length === 0 ? {} : { endpoint: config.llm.endpoint }),
+      ...(config.llm.model.length === 0 ? {} : { model: config.llm.model }),
+      timeoutMs: config.llm.timeoutMs,
+      ...(config.llm.dailyCap === undefined ? {} : { dailyCap: config.llm.dailyCap }),
+    },
+    consolidation: {
+      enabled: config.consolidation.enabled,
+      scanIntervalMs: config.consolidation.scanIntervalMs,
+      promotion: { ...config.consolidation.promotion },
+      deduplication: { ...config.consolidation.deduplication },
+    },
+    learning: { allowNetwork: config.learning.allowNetwork },
+    reflection: { ...config.reflection },
+  };
+}
+
+export function stringifyConfig(file: ConfigFileV3): string {
+  return stringifyYaml(file, { collectionStyle: 'block', lineWidth: 0 });
+}
+
+export function redactedConfig(config: ResolvedConfig): Omit<ResolvedConfig, 'llm'> & { readonly llm: Omit<ResolvedConfig['llm'], 'apiKey'> & { readonly apiKey?: string } } {
+  return {
+    ...config,
+    llm: {
+      mode: config.llm.mode,
+      provider: config.llm.provider,
+      endpoint: config.llm.endpoint,
+      model: config.llm.model,
+      timeoutMs: config.llm.timeoutMs,
+      ...(config.llm.dailyCap === undefined ? {} : { dailyCap: config.llm.dailyCap }),
+      ...(config.llm.apiKey === undefined ? {} : { apiKey: '[redacted]' }),
+    },
+  };
+}
+
+export function configDirectory(path: string): string {
+  return dirname(path);
+}
+
+export function createDefaultConfig(cwd: string = resolve(process.cwd()), brain: string = defaultBrainPath(process.env)): ResolvedConfig {
+  return {
+    schemaVersion: 3,
+    paths: { brain, project: cwd },
+    agents: { enabled: [], writeInstructions: true },
+    retrieval: {
+      semantic: { mode: 'off', modelPath: '' },
+      rerank: { mode: 'off', modelPath: '', modelId: '', topK: 30, timeoutMs: 350 },
+    },
+    llm: { mode: 'off', provider: 'openai-compatible', endpoint: '', model: '', timeoutMs: 30_000 },
+    consolidation: {
+      enabled: false,
+      scanIntervalMs: 600_000,
+      promotion: { minUsefulCount: 2, maxNotUsefulCount: 2 },
+      deduplication: { rejectSimilarity: 0.95, mergeSimilarity: 0.88 },
+    },
+    learning: { allowNetwork: false },
+    reflection: { enabled: false, intervalMs: 7 * 24 * 60 * 60 * 1000, windowDays: 7, minGroupSize: 3, maxGroups: 5 },
+  };
+}
+
+function resolveLayers(defaults: ResolvedConfig, file: ConfigFileV3 | null, env: NodeJS.ProcessEnv, overrides: ConfigOverrides, cwd: string, fileBase: string): { readonly config: ResolvedConfig; readonly sources: Readonly<Record<string, ConfigSource>> } {
+  const sources: Record<string, ConfigSource> = {};
+  const pick = <T>(path: string, overrideValue: T | undefined, envValue: T | undefined, fileValue: T | undefined, defaultValue: T): T => {
+    if (overrideValue !== undefined) { sources[path] = 'override'; return overrideValue; }
+    if (envValue !== undefined) { sources[path] = 'environment'; return envValue; }
+    if (fileValue !== undefined) { sources[path] = 'file'; return fileValue; }
+    sources[path] = 'default';
+    return defaultValue;
+  };
+  const brain = resolveLayeredPath('paths.brain', pick('paths.brain', overrides.paths?.brain, optionalString(env, 'TAGA_BRAIN'), file?.paths?.brain, defaults.paths.brain), sources, cwd, fileBase);
+  const project = resolveLayeredPath('paths.project', pick('paths.project', overrides.paths?.project, optionalString(env, 'TAGA_PROJECT'), file?.paths?.project, defaults.paths.project), sources, cwd, fileBase);
+  const dailyCap = pick('llm.dailyCap', overrides.llm?.dailyCap, optionalPositiveInt(env, 'TAGA_LLM_DAILY_CAP'), file?.llm?.dailyCap, 0);
+  const apiKey = optionalSecret(env, 'TAGA_LLM_API_KEY');
+  if (apiKey !== undefined) sources['llm.apiKey'] = 'environment';
+  const config: ResolvedConfig = {
+    schemaVersion: 3,
+    paths: { brain, project },
+    agents: {
+      enabled: pick('agents.enabled', overrides.agents?.enabled, undefined, file?.agents?.enabled, defaults.agents.enabled),
+      writeInstructions: pick('agents.writeInstructions', overrides.agents?.writeInstructions, undefined, file?.agents?.writeInstructions, defaults.agents.writeInstructions),
+    },
+    retrieval: {
+      semantic: {
+        mode: pick('retrieval.semantic.mode', overrides.retrieval?.semantic?.mode, optionalMode(env, 'TAGA_SEMANTIC_MODE'), file?.retrieval?.semantic?.mode, defaults.retrieval.semantic.mode),
+        modelPath: resolveLayeredOptionalPath('retrieval.semantic.modelPath', pick('retrieval.semantic.modelPath', overrides.retrieval?.semantic?.modelPath, optionalString(env, 'TAGA_BGE_M3_MODEL_PATH'), file?.retrieval?.semantic?.modelPath, defaults.retrieval.semantic.modelPath), sources, cwd, fileBase),
+      },
+      rerank: {
+        mode: pick('retrieval.rerank.mode', overrides.retrieval?.rerank?.mode, optionalMode(env, 'TAGA_RERANK_MODE'), file?.retrieval?.rerank?.mode, defaults.retrieval.rerank.mode),
+        modelPath: resolveLayeredOptionalPath('retrieval.rerank.modelPath', pick('retrieval.rerank.modelPath', overrides.retrieval?.rerank?.modelPath, optionalString(env, 'TAGA_RERANKER_MODEL_PATH'), file?.retrieval?.rerank?.modelPath, defaults.retrieval.rerank.modelPath), sources, cwd, fileBase),
+        modelId: pick('retrieval.rerank.modelId', overrides.retrieval?.rerank?.modelId, optionalString(env, 'TAGA_RERANKER_MODEL_ID'), file?.retrieval?.rerank?.modelId, defaults.retrieval.rerank.modelId),
+        topK: pick('retrieval.rerank.topK', overrides.retrieval?.rerank?.topK, optionalPositiveInt(env, 'TAGA_RERANK_TOP_K'), file?.retrieval?.rerank?.topK, defaults.retrieval.rerank.topK),
+        timeoutMs: pick('retrieval.rerank.timeoutMs', overrides.retrieval?.rerank?.timeoutMs, optionalPositiveInt(env, 'TAGA_RERANK_TIMEOUT_MS'), file?.retrieval?.rerank?.timeoutMs, defaults.retrieval.rerank.timeoutMs),
+      },
+    },
+    llm: {
+      mode: pick('llm.mode', overrides.llm?.mode, optionalMode(env, 'TAGA_LLM_MODE'), file?.llm?.mode, defaults.llm.mode),
+      provider: pick('llm.provider', overrides.llm?.provider, optionalString(env, 'TAGA_LLM_PROVIDER_NAME'), file?.llm?.provider, defaults.llm.provider),
+      endpoint: pick('llm.endpoint', overrides.llm?.endpoint, optionalString(env, 'TAGA_LLM_ENDPOINT'), file?.llm?.endpoint, defaults.llm.endpoint),
+      model: pick('llm.model', overrides.llm?.model, optionalString(env, 'TAGA_LLM_MODEL'), file?.llm?.model, defaults.llm.model),
+      timeoutMs: pick('llm.timeoutMs', overrides.llm?.timeoutMs, optionalPositiveInt(env, 'TAGA_LLM_TIMEOUT_MS'), file?.llm?.timeoutMs, defaults.llm.timeoutMs),
+      ...(dailyCap > 0 ? { dailyCap } : {}),
+      ...(apiKey === undefined ? {} : { apiKey }),
+    },
+    consolidation: {
+      enabled: pick('consolidation.enabled', overrides.consolidation?.enabled, optionalOnOff(env, 'TAGA_CONSOLIDATION_MODE'), file?.consolidation?.enabled, defaults.consolidation.enabled),
+      scanIntervalMs: pick('consolidation.scanIntervalMs', overrides.consolidation?.scanIntervalMs, optionalPositiveInt(env, 'TAGA_CONSOLIDATION_SCAN_INTERVAL_MS'), file?.consolidation?.scanIntervalMs, defaults.consolidation.scanIntervalMs),
+      promotion: {
+        minUsefulCount: pick('consolidation.promotion.minUsefulCount', overrides.consolidation?.promotion?.minUsefulCount, optionalPositiveInt(env, 'TAGA_AUTO_PROMOTE_USEFUL_COUNT'), file?.consolidation?.promotion?.minUsefulCount, defaults.consolidation.promotion.minUsefulCount),
+        maxNotUsefulCount: pick('consolidation.promotion.maxNotUsefulCount', overrides.consolidation?.promotion?.maxNotUsefulCount, optionalPositiveInt(env, 'TAGA_AUTO_PROMOTE_MAX_NOT_USEFUL'), file?.consolidation?.promotion?.maxNotUsefulCount, defaults.consolidation.promotion.maxNotUsefulCount),
+      },
+      deduplication: {
+        rejectSimilarity: pick('consolidation.deduplication.rejectSimilarity', overrides.consolidation?.deduplication?.rejectSimilarity, optionalUnitInterval(env, 'TAGA_DEDUP_REJECT_SIMILARITY'), file?.consolidation?.deduplication?.rejectSimilarity, defaults.consolidation.deduplication.rejectSimilarity),
+        mergeSimilarity: pick('consolidation.deduplication.mergeSimilarity', overrides.consolidation?.deduplication?.mergeSimilarity, optionalUnitInterval(env, 'TAGA_DEDUP_MERGE_SIMILARITY'), file?.consolidation?.deduplication?.mergeSimilarity, defaults.consolidation.deduplication.mergeSimilarity),
+      },
+    },
+    learning: {
+      allowNetwork: pick('learning.allowNetwork', overrides.learning?.allowNetwork, optionalBoolean(env, 'TAGA_LEARN_ALLOW_NETWORK'), file?.learning?.allowNetwork, defaults.learning.allowNetwork),
+    },
+    reflection: {
+      enabled: pick('reflection.enabled', overrides.reflection?.enabled, optionalOnOff(env, 'TAGA_REFLECT_MODE'), file?.reflection?.enabled, defaults.reflection.enabled),
+      intervalMs: pick('reflection.intervalMs', overrides.reflection?.intervalMs, optionalPositiveInt(env, 'TAGA_REFLECT_INTERVAL_MS'), file?.reflection?.intervalMs, defaults.reflection.intervalMs),
+      windowDays: pick('reflection.windowDays', overrides.reflection?.windowDays, optionalPositiveInt(env, 'TAGA_REFLECT_WINDOW_DAYS'), file?.reflection?.windowDays, defaults.reflection.windowDays),
+      minGroupSize: pick('reflection.minGroupSize', overrides.reflection?.minGroupSize, optionalPositiveInt(env, 'TAGA_REFLECT_MIN_GROUP'), file?.reflection?.minGroupSize, defaults.reflection.minGroupSize),
+      maxGroups: pick('reflection.maxGroups', overrides.reflection?.maxGroups, optionalPositiveInt(env, 'TAGA_REFLECT_MAX_GROUPS'), file?.reflection?.maxGroups, defaults.reflection.maxGroups),
+    },
+  };
+  return { config, sources };
+}
+
+function validateResolved(config: ResolvedConfig): void {
+  const issues: string[] = [];
+  if (config.retrieval.semantic.mode !== 'off' && config.retrieval.semantic.modelPath.length === 0) issues.push('retrieval.semantic.modelPath is required when semantic mode is enabled');
+  if (config.retrieval.rerank.mode !== 'off' && config.retrieval.rerank.modelPath.length === 0) issues.push('retrieval.rerank.modelPath is required when rerank mode is enabled');
+  if (config.llm.mode !== 'off' && config.llm.endpoint.length === 0) issues.push('llm.endpoint is required when llm mode is enabled');
+  if (config.llm.mode !== 'off' && config.llm.model.length === 0) issues.push('llm.model is required when llm mode is enabled');
+  if (config.consolidation.deduplication.mergeSimilarity > config.consolidation.deduplication.rejectSimilarity) issues.push('consolidation.deduplication.mergeSimilarity must be <= rejectSimilarity');
+  if (issues.length > 0) throw new ConfigurationError('effective configuration is invalid', issues);
+}
+
+function optionalString(env: NodeJS.ProcessEnv, key: string): string | undefined {
+  const value = env[key];
+  if (value === undefined) return undefined;
+  if (value.length === 0) throw new ConfigurationError(`environment variable ${key} must not be empty`);
+  return value;
+}
+
+function optionalSecret(env: NodeJS.ProcessEnv, key: string): string | undefined {
+  const value = env[key];
+  return value === undefined || value.length === 0 ? undefined : value;
+}
+
+function optionalMode(env: NodeJS.ProcessEnv, key: string): FeatureMode | undefined {
+  const value = env[key];
+  if (value === undefined) return undefined;
+  const parsed = featureModeSchema.safeParse(value);
+  if (!parsed.success) throw new ConfigurationError(`environment variable ${key} must be off, shadow, or on`);
+  return parsed.data;
+}
+
+function optionalPositiveInt(env: NodeJS.ProcessEnv, key: string): number | undefined {
+  const value = env[key];
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) throw new ConfigurationError(`environment variable ${key} must be a positive integer`);
+  return parsed;
+}
+
+function optionalUnitInterval(env: NodeJS.ProcessEnv, key: string): number | undefined {
+  const value = env[key];
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) throw new ConfigurationError(`environment variable ${key} must be between 0 and 1`);
+  return parsed;
+}
+
+function optionalBoolean(env: NodeJS.ProcessEnv, key: string): boolean | undefined {
+  const value = env[key]?.toLowerCase();
+  if (value === undefined) return undefined;
+  if (['1', 'true', 'on', 'yes'].includes(value)) return true;
+  if (['0', 'false', 'off', 'no'].includes(value)) return false;
+  throw new ConfigurationError(`environment variable ${key} must be a boolean`);
+}
+
+function optionalOnOff(env: NodeJS.ProcessEnv, key: string): boolean | undefined {
+  const value = env[key];
+  if (value === undefined) return undefined;
+  if (value === 'on') return true;
+  if (value === 'off') return false;
+  throw new ConfigurationError(`environment variable ${key} must be on or off`);
+}
+
+function resolvePath(cwd: string, value: string): string {
+  return isAbsolute(value) ? resolve(value) : resolve(cwd, value);
+}
+
+function resolveLayeredPath(path: string, value: string, sources: Readonly<Record<string, ConfigSource>>, cwd: string, fileBase: string): string {
+  return resolvePath(sources[path] === 'file' ? fileBase : cwd, value);
+}
+
+function resolveLayeredOptionalPath(path: string, value: string, sources: Readonly<Record<string, ConfigSource>>, cwd: string, fileBase: string): string {
+  return value.length === 0 ? '' : resolveLayeredPath(path, value, sources, cwd, fileBase);
+}
+
+function defaultBrainPath(env: NodeJS.ProcessEnv): string {
+  const home = env.HOME ?? env.USERPROFILE ?? homedir();
+  return resolve(env.TAGA_BRAIN ?? join(home, '.taga', 'brain'));
+}
+
+async function readOptional(path: string): Promise<string | null> {
+  try {
+    return await readFile(path, 'utf8');
+  } catch (error) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function formatIssues(error: z.ZodError): readonly string[] {
+  return error.issues.map((issue) => `${issue.path.length === 0 ? '<root>' : issue.path.join('.')}: ${issue.message}`);
+}

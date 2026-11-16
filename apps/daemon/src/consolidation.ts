@@ -4,7 +4,6 @@ import {
   GovernanceService,
   ProactivePolicyService,
   SqliteAuditLog,
-  consolidationConfigFromEnv,
   consolidationPolicy,
   type ConsolidationConfig,
   type DedupVerdict,
@@ -32,19 +31,22 @@ interface DedupVerdictRecord {
 export function consolidationJobHandlers(
   brainPath: string,
   database: DatabaseStore,
+  config: ConsolidationConfig,
+  semanticModelPath: string,
   deps: ConsolidationJobDeps = {},
 ): ReadonlyMap<string, (job: JobRecord) => Promise<void>> {
   return new Map([
-    [CONSOLIDATION_JOB_KIND, async () => { await runConsolidationScan(brainPath, database, deps); }],
+    [CONSOLIDATION_JOB_KIND, async () => { await runConsolidationScan(brainPath, database, config, semanticModelPath, deps); }],
   ]);
 }
 
 export async function runConsolidationScan(
   brainPath: string,
   database: DatabaseStore,
+  config: ConsolidationConfig,
+  semanticModelPath: string,
   deps: ConsolidationJobDeps = {},
 ): Promise<void> {
-  const config = consolidationConfigFromEnv();
   if (!config.enabled) return;
   const audit = new SqliteAuditLog(database);
   const repository = new MarkdownMemoryRepository(brainPath);
@@ -52,7 +54,7 @@ export async function runConsolidationScan(
   const drafts = records.filter((record) => record.memory.status === 'draft' && record.memory.visibility !== 'excluded');
   if (drafts.length === 0) return;
 
-  const dedup = await semanticDedupVerdicts(brainPath, database, config, records, drafts);
+  const dedup = await semanticDedupVerdicts(brainPath, database, config, semanticModelPath, records, drafts);
   const garden = new GardenService(database);
   const policy = new ProactivePolicyService(audit, consolidationPolicy(config));
   const governance = new GovernanceService(repository, audit);
@@ -114,6 +116,7 @@ async function semanticDedupVerdicts(
   brainPath: string,
   database: DatabaseStore,
   config: ConsolidationConfig,
+  modelPath: string,
   records: readonly StoredMemory[],
   drafts: readonly StoredMemory[],
 ): Promise<{ verdicts: ReadonlyMap<string, DedupVerdict>; bestMatch: ReadonlyMap<string, { memoryId: string; score: number }>; mergedText: ReadonlyMap<string, string> }> {
@@ -121,9 +124,8 @@ async function semanticDedupVerdicts(
   const bestMatch = new Map<string, { memoryId: string; score: number }>();
   const mergedText = new Map<string, string>();
   const index = new ZvecMemoryIndex(join(brainPath, '.taga', 'semantic'));
-  const modelPath = process.env.TAGA_BGE_M3_MODEL_PATH;
   const integrity = await index.integrity();
-  const semanticUnavailable = modelPath === undefined || modelPath.length === 0 || integrity.activeGeneration === null;
+  const semanticUnavailable = modelPath.length === 0 || integrity.activeGeneration === null;
   const semanticMismatch = !semanticUnavailable && (() => {
     const embedder = createLocalBgeM3Embedder({ modelPath, batchSize: 4 });
     return integrity.activeGeneration?.embeddingFingerprint !== embedder.metadata.fingerprint || integrity.activeGeneration?.dimensions !== embedder.metadata.dimensions;

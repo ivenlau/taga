@@ -12,8 +12,12 @@
     "evaluate:semantic": "node scripts/evaluate-semantic.mjs",
     "evaluate:semantic:strict": "node scripts/evaluate-semantic.mjs --suite=strict-300",
     "test": "vitest run",
+    "test:ci": "vitest run --exclude tests/m1-benchmark.test.ts --testTimeout=15000",
+    "test:benchmark": "vitest run tests/m1-benchmark.test.ts --maxWorkers=1 --testTimeout=15000",
     "lint": "eslint . --max-warnings=0",
     "release:package": "node scripts/build-npm-package.mjs",
+    "release:smoke": "node scripts/verify-npm-package.mjs",
+    "release:verify": "node scripts/verify-release-version.mjs",
     "release:tag": "node scripts/tag-release.mjs"
   },
   "pnpm": {

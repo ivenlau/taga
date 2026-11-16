@@ -21,7 +21,7 @@ describe('taga CLI', () => {
 
     const applied = streams();
     expect(await runCli(['init', '--yes', '--json', `--brain=${join(fixture.path, 'brain')}`], { cwd: fixture.path, streams: applied })).toBe(0);
-    expect(await readFile(join(fixture.path, 'brain', '_config.yaml'), 'utf8')).toContain('schemaVersion: 2');
+    expect(await readFile(join(fixture.path, 'brain', 'config.yaml'), 'utf8')).toContain('schemaVersion: 3');
     expect(await runCli(['init', '--yes', '--json', `--brain=${join(fixture.path, 'brain')}`], { cwd: fixture.path, streams: streams() })).toBe(0);
     await fixture.cleanup();
   });
@@ -60,7 +60,7 @@ describe('taga CLI', () => {
     const brain = join(fixture.path, 'brain');
     const output = streams();
     expect(await runCli(['init', '--yes', '--agent=all', '--json', `--brain=${brain}`], { cwd: fixture.path, streams: output })).toBe(0);
-    const config = await readFile(join(brain, '_config.yaml'), 'utf8');
+    const config = await readFile(join(brain, 'config.yaml'), 'utf8');
     expect(config).toContain('pi');
     expect(config).toContain('claude-code');
     expect(config).toContain('codex');

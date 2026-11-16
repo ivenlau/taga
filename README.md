@@ -65,7 +65,7 @@ pnpm install --frozen-lockfile
 pnpm run build
 ```
 
-发布：`pnpm run build && pnpm run release:tag`（打 tag 触发 release 工作流：build + test + 发布 `taga` 包到 npm）。本地组装发布包：`pnpm run release:package`（生成 `npm-package/`，`npm publish ./npm-package --access public` 手动发布）。发布需要 GitHub 仓库配置 `NPM_TOKEN` secret。
+发布：`pnpm run build && pnpm run release:tag`（打 tag 触发 release 工作流：build、lint、隔离的 CI 测试、性能 benchmark、npm 临时安装冒烟验证后发布 `taga` 包）。本地组装发布包：`pnpm run release:package`（生成 `npm-package/`）；本地验证发布包：`pnpm run release:smoke`。发布需要 GitHub 仓库配置 `NPM_TOKEN` secret，且 tag 必须严格匹配 `package.json` 版本。
 
 安装（发布后）：`npm i -g taga` 提供 `taga` 与 `taga-mcp` 两个命令。
 
@@ -169,23 +169,82 @@ MCP `memory_search` 支持显式 `include_draft: true`（CLI 为 `memory search 
 
 ## 配置文件
 
-`~/.taga/brain/_config.yaml`（schemaVersion 2）保存除密钥外的全部行为配置，优先级为 **环境变量 > 配置文件 > 默认值**：
+Taga 使用一个用户可编辑的 `config.yaml`（schemaVersion 3）。默认位置：
+
+- Windows：`%APPDATA%\taga\config.yaml`
+- Linux：`${XDG_CONFIG_HOME:-~/.config}/taga/config.yaml`
+- macOS：`~/Library/Application Support/taga/config.yaml`
+- 显式使用 `--brain=<path>` 且未指定配置路径时：`<brain>/config.yaml`，便于测试和隔离运行
+
+配置路径优先级为 `--config > TAGA_CONFIG > 平台默认路径`。字段优先级为 **当前请求/CLI 参数 > 环境变量 > 配置文件 > 默认值**：
 
 ```yaml
-schemaVersion: 2
-brainPath: C:\Users\123\.taga\brain
-projectPath: D:\codebase\taga
-projectId: project-23b3c0a76f1208b5
-agents: []
-remoteModelAllowed: false
-semantic:      { mode: on, modelPath: D:\cache\huggingface\transformers\Xenova\bge-m3, rerankMode: off }
-consolidation: { mode: on, minUsefulCount: 2, maxNotUsefulCount: 2, rejectSimilarity: 0.95, mergeSimilarity: 0.88, scanIntervalMs: 600000 }
-learn:         { allowNetwork: false }
-reflect:       { mode: on, intervalMs: 604800000, windowDays: 7, minGroupSize: 3, maxGroups: 5 }
-llm:           { mode: shadow, endpoint: http://127.0.0.1:11434/v1/chat/completions, model: MiniMax-M3, timeoutMs: 30000, providerName: openai-compatible, dailyCap: 100 }
+schemaVersion: 3
+
+paths:
+  brain: C:\Users\123\.taga\brain
+  project: D:\codebase\taga
+
+agents:
+  enabled:
+    - claude-code
+    - codex
+  writeInstructions: true
+
+retrieval:
+  semantic:
+    mode: on
+    modelPath: D:\models\bge-m3
+  rerank:
+    mode: off
+    modelPath: D:\models\reranker
+    modelId: default
+    topK: 30
+    timeoutMs: 350
+
+llm:
+  mode: shadow
+  provider: openai-compatible
+  endpoint: http://127.0.0.1:11434/v1/chat/completions
+  model: MiniMax-M3
+  timeoutMs: 30000
+  dailyCap: 100
+
+consolidation:
+  enabled: true
+  scanIntervalMs: 600000
+  promotion:
+    minUsefulCount: 2
+    maxNotUsefulCount: 2
+  deduplication:
+    rejectSimilarity: 0.95
+    mergeSimilarity: 0.88
+
+learning:
+  allowNetwork: false
+
+reflection:
+  enabled: true
+  intervalMs: 604800000
+  windowDays: 7
+  minGroupSize: 3
+  maxGroups: 5
 ```
 
-配置文件经 zod schema 校验：未知键忽略并警告，v1 旧文件自动兼容升级，非法文件回退默认值并给出原因。API Key 建议用环境变量 `TAGA_LLM_API_KEY`；init 引导模式（有终端且未加 `--yes` 时自动进入）也可写入配置文件。
+配置文件经严格 zod schema 校验：未知键、非法类型和非法环境变量都会返回具体字段路径，不再静默回退。文件中的相对路径相对 `config.yaml` 目录解析；CLI 和环境变量中的相对路径相对当前工作目录解析。
+
+API Key 不属于配置 schema，只能通过 `TAGA_LLM_API_KEY` 提供；`config show` 会统一脱敏。长运行的 daemon 和 MCP 在启动时读取一次配置，修改后需要重启。
+
+配置诊断与迁移：
+
+```bash
+taga config validate
+taga config show --effective
+taga config migrate              # 预览 v1/v2 迁移
+taga config migrate --write      # 写入 schemaVersion 3，旧文件保留
+```
+
+旧版 Brain 内的 `_config.yaml` 会在新配置缺失时只读加载并给出迁移提示。`projectId`、agent target paths、数据库、锁和健康状态均由运行时派生，不再写入用户配置，也不再生成冗余的 `agents/*.yaml`。
 
 ## 用户指定知识学习（`taga learn`）
 
@@ -275,7 +334,7 @@ bge-reranker-v2-m3/
 
 ## MCP
 
-`taga-mcp` 从 stdin 接收一行一个 JSON 请求，并向 stdout 返回一行一个 JSON 响应。默认 Brain 位于 `~/.taga/brain`，可通过 `TAGA_BRAIN` 修改。
+`taga-mcp` 从 stdin 接收一行一个 JSON 请求，并向 stdout 返回一行一个 JSON 响应。Brain 路径来自统一配置，也可通过 `TAGA_BRAIN` 临时覆盖；配置文件可通过 `TAGA_CONFIG` 指定。
 
 已实现的主要工具包括：
 

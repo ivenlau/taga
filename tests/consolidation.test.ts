@@ -15,12 +15,25 @@ import {
   SqliteAuditLog,
   evaluateProactivePolicy,
   enqueueConsolidationScan,
+  type ConsolidationConfig,
 } from '../packages/application/src/index.js';
 import { createTemporaryDirectory } from '../packages/testkit/src/index.js';
 import type { Memory } from '../packages/domain/src/index.js';
 import type { StructuredCompletionProvider } from '../packages/distillation/src/index.js';
 
 let memoryCounter = 0;
+
+const enabledConsolidation: ConsolidationConfig = {
+  enabled: true,
+  minUsefulCount: 2,
+  maxNotUsefulCount: 2,
+  rejectSimilarity: 0.95,
+  mergeSimilarity: 0.88,
+  scanIntervalMs: 600_000,
+  llm: undefined,
+};
+
+const disabledConsolidation: ConsolidationConfig = { ...enabledConsolidation, enabled: false };
 
 function memory(overrides: Partial<Memory> = {}): Memory {
   memoryCounter += 1;
@@ -200,7 +213,7 @@ describe('consolidation scan', () => {
     const draft = memory({ id: 'mem-promote', status: 'draft', usefulCount: 2 });
     const { fixture, database } = await setup([draft]);
     try {
-      await runConsolidationScan(fixture.path, database);
+      await runConsolidationScan(fixture.path, database, enabledConsolidation, '');
       const repository = new MarkdownMemoryRepository(fixture.path);
       const updated = await repository.get('mem-promote');
       expect(updated?.status).toBe('active');
@@ -230,7 +243,7 @@ describe('consolidation scan', () => {
       at: '2026-11-14T00:00:00.000Z',
     }));
     try {
-      await runConsolidationScan(fixture.path, database);
+      await runConsolidationScan(fixture.path, database, enabledConsolidation, '');
       const repository = new MarkdownMemoryRepository(fixture.path);
       expect((await repository.get('mem-duplicate'))?.status).toBe('draft');
       const proposals = database.listMetadata('garden:proposal:').map((entry) => JSON.parse(entry.value) as { category?: string });
@@ -248,7 +261,7 @@ describe('consolidation scan', () => {
     const draft = memory({ id: 'mem-disabled', status: 'draft', usefulCount: 9 });
     const { fixture, database } = await setup([draft]);
     try {
-      await runConsolidationScan(fixture.path, database);
+      await runConsolidationScan(fixture.path, database, disabledConsolidation, '');
       const repository = new MarkdownMemoryRepository(fixture.path);
       expect((await repository.get('mem-disabled'))?.status).toBe('draft');
     } finally {

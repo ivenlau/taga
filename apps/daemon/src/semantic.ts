@@ -3,7 +3,7 @@ import { chunkText, createLocalBgeM3Embedder, type EmbeddingInput } from '../../
 import { enqueueSemanticRebuild, ZvecMemoryIndex, type MemoryChunkRecord } from '../../../packages/semantic-index/src/index.js';
 import { MarkdownMemoryRepository, type DatabaseStore, type JobRecord, type StoredMemory } from '../../../packages/storage/src/index.js';
 
-export function semanticJobHandlers(brainPath: string, database: DatabaseStore): ReadonlyMap<string, (job: JobRecord) => Promise<void>> {
+export function semanticJobHandlers(brainPath: string, database: DatabaseStore, modelPath = ''): ReadonlyMap<string, (job: JobRecord) => Promise<void>> {
   return new Map([
     ['semantic.upsert', async (job: JobRecord) => {
       const payload = JSON.parse(job.payload) as { memoryId?: unknown; contentHash?: unknown };
@@ -15,8 +15,7 @@ export function semanticJobHandlers(brainPath: string, database: DatabaseStore):
         return;
       }
       if (typeof payload.contentHash === 'string' && payload.contentHash !== record.memory.contentHash) return;
-      const modelPath = process.env.TAGA_BGE_M3_MODEL_PATH;
-      if (modelPath === undefined || modelPath.length === 0) throw new Error('TAGA_BGE_M3_MODEL_PATH is not configured');
+      if (modelPath.length === 0) throw new Error('retrieval.semantic.modelPath is not configured');
       const embedder = createLocalBgeM3Embedder({ modelPath, batchSize: 4 });
       const chunks = chunkText(`${record.memory.title}\n\n${record.memory.summary}\n\n${record.body}`);
       const inputs: readonly EmbeddingInput[] = chunks.map((chunk) => ({ id: `${record.memory.id}:${chunk.index}`, text: chunk.text }));
@@ -53,8 +52,7 @@ export function semanticJobHandlers(brainPath: string, database: DatabaseStore):
       if (integrity.activeGeneration !== null) await index.removeMemory(payload.memoryId);
     }],
     ['semantic.rebuild', async () => {
-      const modelPath = process.env.TAGA_BGE_M3_MODEL_PATH;
-      if (modelPath === undefined || modelPath.length === 0) throw new Error('TAGA_BGE_M3_MODEL_PATH is not configured');
+      if (modelPath.length === 0) throw new Error('retrieval.semantic.modelPath is not configured');
       const embedder = createLocalBgeM3Embedder({ modelPath, batchSize: 4 });
       const repository = new MarkdownMemoryRepository(brainPath);
       const index = new ZvecMemoryIndex(join(brainPath, '.taga', 'semantic'));

@@ -40,6 +40,7 @@ describe('M2-08 platform and systemd support', () => {
     };
     const manager = new SystemdUserServiceManager({
       brainPath: brain,
+      configPath: join(fixture.path, 'config with spaces.yaml'),
       daemonEntryPath: '/opt/taga/daemon main.js',
       nodePath: '/usr/bin/node',
       configHome: join(fixture.path, '.config'),
@@ -47,7 +48,9 @@ describe('M2-08 platform and systemd support', () => {
     });
     expect((await manager.install()).active).toBe(true);
     expect((await manager.install()).enabled).toBe(true);
-    expect(await readFile(manager.unitPath, 'utf8')).toContain('UMask=0077');
+    const unit = await readFile(manager.unitPath, 'utf8');
+    expect(unit).toContain('UMask=0077');
+    expect(unit).toContain('--config=');
     expect(renderSystemdUnit('/usr/bin/node', '/opt/taga/daemon.js', brain)).toContain('"--brain=');
     expect((await manager.restart()).active).toBe(true);
     expect((await manager.stop()).active).toBe(false);
