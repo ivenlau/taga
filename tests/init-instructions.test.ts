@@ -2,7 +2,7 @@ import { describe, expect, it, afterEach } from 'vitest';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { runCli } from '../apps/cli/src/index.js';
-import { writeManagedBlock } from '../packages/storage/src/index.js';
+import { markerBegin, markerEnd, upsertManagedBlock } from '../packages/storage/src/index.js';
 import { DEFAULT_AGENT_INSTRUCTIONS } from '../packages/adapters/src/index.js';
 import { createTemporaryDirectory } from '../packages/testkit/src/index.js';
 
@@ -32,7 +32,7 @@ async function readFileOr(path: string): Promise<string> {
 }
 
 describe('init agent instructions', () => {
-  it('writes instruction blocks into project and global instruction files', async () => {
+  it('leaves instruction files untouched until agent install is requested', async () => {
     const fixture = await createTemporaryDirectory();
     const configHome = join(fixture.path, 'config-home');
     setEnv('CLAUDE_CONFIG_DIR', join(configHome, '.claude'));
@@ -41,6 +41,17 @@ describe('init agent instructions', () => {
     try {
       const streams = { stdout: process.stdout, stderr: process.stderr } as const;
       expect(await runCli(['init', '--yes', '--agent=claude-code,codex', '--json', `--brain=${brain}`], { cwd: fixture.path, streams })).toBe(0);
+
+      for (const target of [
+        join(fixture.path, 'CLAUDE.md'),
+        join(fixture.path, 'AGENTS.md'),
+        join(configHome, '.claude', 'CLAUDE.md'),
+        join(configHome, '.codex', 'AGENTS.md'),
+      ]) {
+        expect(await readFileOr(target), target).toBe('');
+      }
+
+      expect(await runCli(['agent', 'install', '--agent=claude-code,codex', '--yes', '--json', `--brain=${brain}`], { cwd: fixture.path, streams })).toBe(0);
 
       for (const target of [
         join(fixture.path, 'CLAUDE.md'),
@@ -67,10 +78,11 @@ describe('init agent instructions', () => {
     const streams = { stdout: process.stdout, stderr: process.stderr } as const;
     try {
       expect(await runCli(['init', '--yes', '--agent=claude-code', '--json', `--brain=${brain}`], { cwd: fixture.path, streams })).toBe(0);
+      expect(await runCli(['agent', 'install', '--agent=claude-code', '--yes', '--json', `--brain=${brain}`], { cwd: fixture.path, streams })).toBe(0);
       const projectClaude = join(fixture.path, 'CLAUDE.md');
       const before = await readFile(projectClaude, 'utf8');
       expect(before.match(/taga:instructions:begin/g)).toHaveLength(1);
-      expect(await runCli(['init', '--yes', '--agent=claude-code', '--json', `--brain=${brain}`], { cwd: fixture.path, streams })).toBe(0);
+      expect(await runCli(['agent', 'install', '--agent=claude-code', '--yes', '--json', `--brain=${brain}`], { cwd: fixture.path, streams })).toBe(0);
       const after = await readFile(projectClaude, 'utf8');
       expect(after).toBe(before);
       expect(after.match(/taga:instructions:begin/g)).toHaveLength(1);
@@ -80,14 +92,14 @@ describe('init agent instructions', () => {
     }
   }, 30_000);
 
-  it('skips instruction blocks with --no-instructions', async () => {
+  it('never writes instruction blocks during init', async () => {
     const fixture = await createTemporaryDirectory();
     setEnv('CLAUDE_CONFIG_DIR', join(fixture.path, 'home', '.claude'));
     setEnv('CODEX_HOME', join(fixture.path, 'home', '.codex'));
     const brain = join(fixture.path, 'brain');
     const streams = { stdout: process.stdout, stderr: process.stderr } as const;
     try {
-      expect(await runCli(['init', '--yes', '--agent=claude-code,codex', '--no-instructions', '--json', `--brain=${brain}`], { cwd: fixture.path, streams })).toBe(0);
+      expect(await runCli(['init', '--yes', '--agent=claude-code,codex', '--json', `--brain=${brain}`], { cwd: fixture.path, streams })).toBe(0);
       expect(await readFileOr(join(fixture.path, 'CLAUDE.md'))).not.toContain('taga:instructions:begin');
       expect(await readFileOr(join(fixture.path, 'AGENTS.md'))).not.toContain('taga:instructions:begin');
       expect(await readFileOr(join(fixture.path, 'home', '.claude', 'CLAUDE.md'))).toBe('');
@@ -105,8 +117,9 @@ describe('init agent instructions', () => {
     const streams = { stdout: process.stdout, stderr: process.stderr } as const;
     try {
       expect(await runCli(['init', '--yes', '--agent=claude-code', '--json', `--brain=${brain}`], { cwd: fixture.path, streams })).toBe(0);
+      expect(await runCli(['agent', 'install', '--agent=claude-code', '--yes', '--json', `--brain=${brain}`], { cwd: fixture.path, streams })).toBe(0);
       const projectClaude = join(fixture.path, 'CLAUDE.md');
-      await writeManagedBlock(projectClaude, 'SESSION CONTEXT PACK CONTENT');
+      await upsertManagedBlock(projectClaude, 'SESSION CONTEXT PACK CONTENT', { begin: markerBegin, end: markerEnd });
       const after = await readFile(projectClaude, 'utf8');
       expect(after).toContain('taga:instructions:begin');
       expect(after).toContain('memory_session_start');

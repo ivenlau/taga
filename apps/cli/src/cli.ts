@@ -56,7 +56,7 @@ import {
 } from '../../../packages/domain/src/index.js';
 import { runLearn, runLearnWatch } from '../../../packages/learning/src/index.js';
 import { FtsRetrievalProvider } from '../../../packages/retrieval/src/index.js';
-import { createLocalBgeM3Embedder } from '../../../packages/embedding/src/index.js';
+import { createLocalBgeM3Embedder, downloadBgeM3Model } from '../../../packages/embedding/src/index.js';
 import {
   enqueueSemanticOptimize,
   enqueueSemanticRebuild,
@@ -86,6 +86,7 @@ import {
 } from '../../../packages/storage/src/index.js';
 import { SessionContextService } from '../../../packages/session/src/index.js';
 import { resolveProjectContext, type ProjectContext } from '../../../packages/project-context/src/index.js';
+import { runInitWizard, type InitWizardUi } from './init-wizard.js';
 
 export const exitCodes = {
   success: 0,
@@ -117,6 +118,7 @@ interface CliResponse {
   readonly data?: unknown;
   readonly warnings?: readonly string[];
   readonly request_id?: string;
+  readonly silent?: boolean;
 }
 
 interface ParsedArgs {
@@ -258,94 +260,77 @@ async function dispatch(args: ParsedArgs, context: CliContext): Promise<CliRespo
 
 const isInteractiveTerminal = (): boolean => process.stdout.isTTY === true && process.stdin.isTTY === true;
 
-async function promptValue(question: string, defaultValue?: string): Promise<string> {
-  const { createInterface } = await import('node:readline');
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const suffix = defaultValue !== undefined && defaultValue.length > 0 ? ` [${defaultValue}]` : '';
-  const answer = await new Promise<string>((resolve) => rl.question(`${question}${suffix}: `, resolve));
-  rl.close();
-  const trimmed = answer.trim();
-  return trimmed.length === 0 && defaultValue !== undefined ? defaultValue : trimmed;
-}
-
-async function promptConfirm(question: string, defaultYes: boolean): Promise<boolean> {
-  const { createInterface } = await import('node:readline');
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const answer = await new Promise<string>((resolve) => rl.question(`${question} [${defaultYes ? 'Y/n' : 'y/N'}]: `, resolve));
-  rl.close();
-  const trimmed = answer.trim().toLowerCase();
-  if (trimmed.length === 0) return defaultYes;
-  return trimmed === 'y' || trimmed === 'yes' || trimmed === '是';
-}
-
 async function initCommand(context: CliContext): Promise<CliResponse> {
   const options = new Map(context.options);
+  const projectOptions = ['project', 'project-root', 'project-id'].filter((option) => options.has(option));
+  if (projectOptions.length > 0) {
+    throw new CliFailure(
+      exitCodes.invalidInput,
+      'INVALID_INPUT',
+      `init does not accept project context options (${projectOptions.map((option) => `--${option}`).join(', ')}); projects are detected at runtime from the Agent working directory`,
+    );
+  }
   const interactive = isInteractiveTerminal()
     && context.options.get('yes') !== true
-    && context.options.get('no-interactive') !== true;
+    && context.options.get('no-interactive') !== true
+    && !context.json;
   let brainPath = context.brainPath;
-  let projectPath = resolve(context.cwd, optionString(options, 'project-root') ?? optionString(options, 'project') ?? context.cwd);
-  if (interactive) {
-    process.stdout.write('\n== Taga 引导式配置 ==（回车保留默认值；API Key 仅从 TAGA_LLM_API_KEY 读取）\n');
-    brainPath = resolve(context.cwd, await promptValue('Brain 数据目录', brainPath));
-    projectPath = resolve(context.cwd, await promptValue('项目目录', projectPath));
-    options.set('project-root', projectPath);
-    const configuredAgents = context.config.agents.enabled.length === 0 ? 'claude-code,codex' : context.config.agents.enabled.join(',');
-    const agentsAnswer = await promptValue('注册哪些 agent 适配器（逗号分隔：claude-code,codex,pi,opencode,cursor,windsurf,cline,roo,local）', configuredAgents);
-    const semanticOn = await promptConfirm('启用本地语义检索（BGE-M3）', context.config.retrieval.semantic.mode !== 'off');
-    let semanticModelPath: string | undefined;
-    if (semanticOn) semanticModelPath = await promptValue('BGE-M3 模型目录', context.config.retrieval.semantic.modelPath);
-    const llmMode = await promptValue('LLM 模式（off/shadow/on，蒸馏与反思质量取决于此）', context.config.llm.mode);
-    let llmEndpoint: string | undefined;
-    let llmModel: string | undefined;
-    let llmDailyCap: number | undefined;
-    if (llmMode !== 'off') {
-      llmEndpoint = await promptValue('LLM 端点（OpenAI 兼容 chat/completions 地址）', context.config.llm.endpoint || 'http://127.0.0.1:11434/v1/chat/completions');
-      llmModel = await promptValue('LLM 模型名', context.config.llm.model || 'MiniMax-M3');
-      const capAnswer = await promptValue('每日 LLM 调用上限（回车=不限制）', context.config.llm.dailyCap?.toString() ?? '');
-      const capParsed = Number(capAnswer);
-      if (Number.isInteger(capParsed) && capParsed > 0) llmDailyCap = capParsed;
-    }
-    const consolidationOn = await promptConfirm('启用后台整合与自动晋升', context.config.consolidation.enabled);
-    const reflectOn = await promptConfirm('启用周期反思（每周提炼高层洞察）', context.config.reflection.enabled);
-    const learnNetwork = await promptConfirm('允许 learn --url 抓取网页内容', context.config.learning.allowNetwork);
-    options.set('agent', agentsAnswer);
-    options.set('semantic-file-mode', semanticOn ? 'on' : 'off');
-    if (semanticOn && semanticModelPath !== undefined && semanticModelPath.length > 0) options.set('semantic-file-model-path', semanticModelPath);
-    options.set('llm-file-mode', llmMode);
-    if (llmMode !== 'off') {
-      if (llmEndpoint !== undefined) options.set('llm-file-endpoint', llmEndpoint);
-      if (llmModel !== undefined) options.set('llm-file-model', llmModel);
-      if (llmDailyCap !== undefined) options.set('llm-file-daily-cap', String(llmDailyCap));
-    }
-    options.set('consolidation-file-mode', consolidationOn ? 'on' : 'off');
-    options.set('reflect-file-mode', reflectOn ? 'on' : 'off');
-    options.set('learn-file-allow-network', learnNetwork ? 'true' : 'false');
-  }
-  const project = await resolveProjectContext({
-    cwd: projectPath,
-    ...(optionString(options, 'project-root') === undefined && optionString(options, 'project') === undefined ? {} : { projectRoot: optionString(options, 'project-root') ?? optionString(options, 'project') as string }),
-    ...(optionString(options, 'project-id') === undefined ? {} : { projectId: optionString(options, 'project-id') as string }),
-    markerFile: context.config.projectResolution.markerFile,
-  });
-  projectPath = project.root;
-  const projectId = project.id;
+  let configPath = context.configPath;
   const registry = new AgentAdapterRegistry();
+  let wizardUi: InitWizardUi | undefined;
+  let interactiveConfirmed = false;
+  let downloadSemanticModel = false;
+  if (interactive) {
+    const { createClackInitUi } = await import('./clack-init-ui.js');
+    wizardUi = createClackInitUi();
+    const enabledAgents = requestedAgentIds(
+      optionString(options, 'agent') ?? (context.config.agents.enabled.length === 0 ? 'claude-code,codex' : context.config.agents.enabled.join(',')),
+      registry,
+    );
+    const result = await runInitWizard({
+      cwd: context.cwd,
+      brainPath,
+      agents: registry.all().map((adapter) => ({ value: adapter.id, label: agentDisplayName(adapter.id) })),
+      enabledAgents: enabledAgents.filter((agentId) => registry.get(agentId) !== null),
+      semanticMode: context.config.retrieval.semantic.mode,
+      semanticModelPath: context.config.retrieval.semantic.modelPath,
+      llmMode: context.config.llm.mode,
+      llmEndpoint: context.config.llm.endpoint,
+      llmModel: context.config.llm.model,
+      ...(context.config.llm.dailyCap === undefined ? {} : { llmDailyCap: context.config.llm.dailyCap }),
+      consolidationEnabled: context.config.consolidation.enabled,
+      reflectionEnabled: context.config.reflection.enabled,
+      learnAllowNetwork: context.config.learning.allowNetwork,
+      configPathForBrain: (selectedBrainPath) => initConfigPath(context, selectedBrainPath),
+    }, wizardUi);
+    if (result === undefined) return { ok: true, code: 'INIT_CANCELLED', message: 'initialization cancelled', silent: true };
+    brainPath = result.brainPath;
+    configPath = initConfigPath(context, brainPath);
+    options.set('agent', result.agentIds.join(','));
+    options.set('semantic-file-mode', result.semanticMode);
+    if (result.semanticModelPath.length > 0) options.set('semantic-file-model-path', result.semanticModelPath);
+    options.set('llm-file-mode', result.llmMode);
+    if (result.llmEndpoint !== undefined) options.set('llm-file-endpoint', result.llmEndpoint);
+    if (result.llmModel !== undefined) options.set('llm-file-model', result.llmModel);
+    options.set('llm-file-daily-cap', result.llmDailyCap?.toString() ?? '0');
+    options.set('consolidation-file-mode', result.consolidationEnabled ? 'on' : 'off');
+    options.set('reflect-file-mode', result.reflectionEnabled ? 'on' : 'off');
+    options.set('learn-file-allow-network', result.learnAllowNetwork ? 'true' : 'false');
+    interactiveConfirmed = true;
+    downloadSemanticModel = result.downloadSemanticModel;
+  }
   const requested = requestedAgentIds(optionString(options, 'agent') ?? (context.config.agents.enabled.length === 0 ? 'local' : context.config.agents.enabled.join(',')), registry);
-  const agents = requested.map((agentId) => {
-    const adapter = registry.get(agentId);
-    const targetPaths = adapter?.staticTargets(projectPath) ?? [join(projectPath, agentId === 'claude' || agentId === 'claude-code' ? 'CLAUDE.md' : 'AGENTS.md')];
-    const targetPath = targetPaths[0];
-    if (targetPath === undefined) throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', `agent has no static target: ${agentId}`);
-    return { id: adapter?.id ?? agentId, targetPath, targetPaths };
-  });
+  const agents = requested.map((agentId) => ({ id: registry.get(agentId)?.id ?? agentId }));
   const semanticMode = optionString(options, 'semantic-file-mode');
   const llmMode = optionString(options, 'llm-file-mode');
   const consolidationMode = optionString(options, 'consolidation-file-mode');
   const reflectionMode = optionString(options, 'reflect-file-mode');
   const overrides: ConfigOverrides = {
     paths: { brain: brainPath },
-    agents: { enabled: agents.map((agent) => agent.id), writeInstructions: options.get('no-instructions') !== true },
+    agents: {
+      enabled: agents.map((agent) => agent.id),
+      writeInstructions: options.get('no-instructions') === true ? false : context.config.agents.writeInstructions,
+    },
     retrieval: {
       semantic: {
         ...(semanticMode === undefined ? {} : { mode: semanticMode as FeatureMode }),
@@ -362,22 +347,15 @@ async function initCommand(context: CliContext): Promise<CliResponse> {
     reflection: reflectionMode === undefined ? {} : { enabled: reflectionMode === 'on' },
     learning: optionString(options, 'learn-file-allow-network') === undefined ? {} : { allowNetwork: optionString(options, 'learn-file-allow-network') === 'true' },
   };
-  const initialized = await loadConfig({ cwd: context.cwd, env: context.env, configPath: context.configPath, overrides });
-  const writeInstructions = initialized.config.agents.writeInstructions;
+  const initialized = await loadConfig({ cwd: context.cwd, env: context.env, configPath, overrides });
   const preview = {
     brainPath,
-    configPath: context.configPath,
-    projectPath,
-    projectId,
-    collectionScope: ['global', `project:${projectId}`],
+    configPath,
     network: initialized.config.learning.allowNetwork ? 'enabled' : 'disabled',
-    agents: agents.map((agent) => ({ id: agent.id, targetPath: agent.targetPath, targetPaths: agent.targetPaths })),
-    changes: [...new Set([
-      context.configPath,
-      ...agents.flatMap((agent) => writeInstructions ? agent.targetPaths : [agent.targetPath]),
-    ])],
+    agents: agents.map((agent) => ({ id: agent.id })),
+    changes: [configPath],
   };
-  if (!isConfirmed(options)) {
+  if (!interactiveConfirmed && !isConfirmed(options)) {
     throw new CliFailure(
       exitCodes.confirmationRequired,
       'CONFIRMATION_REQUIRED',
@@ -386,36 +364,43 @@ async function initCommand(context: CliContext): Promise<CliResponse> {
     );
   }
   await ensurePrivateDirectory(brainPath);
-  await mkdir(configDirectory(context.configPath), { recursive: true });
-  await atomicWrite(context.configPath, stringifyConfig(configFileFromResolved(initialized.config)));
-  const initWarnings = [...initialized.warnings];
-  for (const agent of agents) {
-    await ensureMarkerFile(agent.targetPath);
-    if (writeInstructions) {
-      for (const target of agent.targetPaths) {
-        try {
-          await upsertManagedBlock(target, DEFAULT_AGENT_INSTRUCTIONS, { begin: instructionBlockBegin, end: instructionBlockEnd });
-        } catch (error) {
-          if (target === agent.targetPath) throw error;
-          initWarnings.push(`optional global agent target was not updated: ${target}: ${errorMessage(error)}`);
-        }
-      }
+  if (downloadSemanticModel) {
+    const activity = wizardUi?.activity();
+    let lastProgress = '';
+    activity?.start('Downloading BGE-M3 model');
+    try {
+      await downloadBgeM3Model({
+        brainPath,
+        onProgress: ({ file, loaded, total }) => {
+          const progress = `Downloading ${file} (${formatPercent(loaded, total)})`;
+          if (progress !== lastProgress) {
+            lastProgress = progress;
+            activity?.update(progress);
+          }
+        },
+      });
+      activity?.stop('BGE-M3 downloaded and verified');
+    } catch (error) {
+      activity?.error('BGE-M3 download failed; configuration was not written');
+      throw error;
     }
   }
+  await mkdir(configDirectory(configPath), { recursive: true });
+  await atomicWrite(configPath, stringifyConfig(configFileFromResolved(initialized.config)));
+  const initWarnings = [...initialized.warnings];
   await mkdir(join(brainPath, 'global'), { recursive: true });
   const database = new DatabaseStore(join(brainPath, 'taga.db'));
   try {
-    database.saveProjectContext(projectRecord(project));
     for (const agent of agents) database.upsertMetadata(`pack:enabled:${agent.id}`, 'true');
     if (database.getMetadata('brain.initialized') === null) {
       await new SqliteAuditLog(database).append({
         eventType: 'brain.initialized',
         actor: 'user',
         subjectType: 'brain',
-        subjectId: projectId,
+        subjectId: 'brain',
         occurredAt: new Date().toISOString(),
         reason: 'init --yes',
-        payload: { projectPath, agentIds: agents.map((agent) => agent.id) },
+        payload: { agentIds: agents.map((agent) => agent.id) },
       });
       database.upsertMetadata('brain.initialized', new Date().toISOString());
     }
@@ -423,7 +408,11 @@ async function initCommand(context: CliContext): Promise<CliResponse> {
     database.close();
   }
   const warnings = optionString(options, 'llm-file-api-key') === undefined ? initWarnings : [...initWarnings, '--llm-file-api-key is ignored; use TAGA_LLM_API_KEY'];
-  return { ok: true, code: 'INITIALIZED', message: 'taga initialized', data: preview, ...(warnings.length === 0 ? {} : { warnings }) };
+  if (wizardUi !== undefined) {
+    for (const warning of warnings) wizardUi.warn(warning);
+    wizardUi.outro('Taga is ready.');
+  }
+  return { ok: true, code: 'INITIALIZED', message: 'taga initialized', data: preview, ...(warnings.length === 0 ? {} : { warnings }), ...(interactive ? { silent: true } : {}) };
 }
 
 async function configCommand(subcommand: string | undefined, context: CliContext): Promise<CliResponse> {
@@ -1332,11 +1321,15 @@ async function agentCommand(subcommand: string | undefined, positionals: readonl
     const targets = requested.map((id) => ({ id, targetPaths: agentTargetPaths(registry, id, project.root) }));
     const preview = { project, agents: targets };
     if (!isConfirmed(context.options)) throw new CliFailure(exitCodes.confirmationRequired, 'CONFIRMATION_REQUIRED', 'agent install preview is ready; rerun with --yes', preview);
-    for (const target of targets.flatMap((item) => item.targetPaths)) {
-      await upsertManagedBlock(target, DEFAULT_AGENT_INSTRUCTIONS, { begin: instructionBlockBegin, end: instructionBlockEnd });
+    for (const agent of targets) {
+      const primaryTarget = agent.targetPaths[0];
+      if (primaryTarget !== undefined) await ensureMarkerFile(primaryTarget);
+      for (const target of agent.targetPaths) {
+        await upsertManagedBlock(target, DEFAULT_AGENT_INSTRUCTIONS, { begin: instructionBlockBegin, end: instructionBlockEnd });
+      }
     }
     const enabled = [...new Set([...context.config.agents.enabled, ...requested])];
-    const updated = await loadConfig({ cwd: context.cwd, env: context.env, configPath: context.configPath, overrides: { agents: { enabled } } });
+    const updated = await loadConfig({ cwd: context.cwd, env: context.env, configPath: context.configPath, overrides: { agents: { enabled, writeInstructions: true } } });
     await mkdir(configDirectory(context.configPath), { recursive: true });
     await atomicWrite(context.configPath, stringifyConfig(configFileFromResolved(updated.config)));
     const database = new DatabaseStore(context.databasePath);
@@ -1644,6 +1637,31 @@ function requestedAgentIds(value: string, registry: AgentAdapterRegistry): reado
   return [...new Set(normalized)];
 }
 
+function initConfigPath(context: CliContext, brainPath: string): string {
+  const requestedConfig = optionString(context.options, 'config') ?? context.env.TAGA_CONFIG;
+  if (requestedConfig !== undefined && requestedConfig.length > 0) return resolve(context.cwd, requestedConfig);
+  return optionString(context.options, 'brain') === undefined ? context.configPath : join(brainPath, 'config.yaml');
+}
+
+function agentDisplayName(id: string): string {
+  const names: Readonly<Record<string, string>> = {
+    'claude-code': 'Claude Code',
+    codex: 'Codex',
+    pi: 'Pi',
+    opencode: 'OpenCode',
+    cursor: 'Cursor',
+    windsurf: 'Windsurf',
+    cline: 'Cline',
+    roo: 'Roo Code',
+  };
+  return names[id] ?? id;
+}
+
+function formatPercent(loaded: number, total: number): string {
+  if (total <= 0) return 'preparing';
+  return `${Math.min(100, Math.max(0, Math.round((loaded / total) * 100)))}%`;
+}
+
 async function configuredAgentTargets(context: CliContext, resolvedProject?: ProjectContext): Promise<readonly { readonly id: string; readonly targetPaths: readonly string[] }[]> {
   const project = resolvedProject ?? await resolveCliProject(context);
   const registry = new AgentAdapterRegistry();
@@ -1747,6 +1765,7 @@ async function scanMarkdown(brainPath: string): Promise<{ records: readonly { me
 }
 
 async function markerHealth(context: CliContext): Promise<{ ok: boolean; status: string; detail?: string }> {
+  if (!context.config.agents.writeInstructions) return { ok: true, status: 'not-configured' };
   const targets = (await configuredAgentTargets(context)).flatMap((agent) => agent.targetPaths);
   if (targets.length === 0) return { ok: true, status: 'not-configured' };
   const failures: string[] = [];
@@ -1766,6 +1785,7 @@ async function markerHealth(context: CliContext): Promise<{ ok: boolean; status:
 }
 
 function writeResponse(streams: CliStreams, json: boolean, response: CliResponse): void {
+  if (response.silent === true) return;
   if (json) {
     streams.stdout.write(`${JSON.stringify(response)}\n`);
     return;

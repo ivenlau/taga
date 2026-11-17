@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "dependencies": {
+    "@clack/prompts": "1.9.0",
     "@taga/metrics": "workspace:*",
     "@taga/platform": "workspace:*",
     "@taga/release": "workspace:*",

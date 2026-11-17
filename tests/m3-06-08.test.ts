@@ -49,6 +49,7 @@ describe('M3-06 agent distribution', () => {
     await writeFile(cursorTarget, '---\ndescription: User rule\n---\nuser content\n', 'utf8');
     const output = streams();
     expect(await runCli(['init', '--yes', '--agent=cursor,windsurf,cline,roo', '--json', `--brain=${brain}`], { cwd: fixture.path, streams: output })).toBe(0);
+    expect(await runCli(['agent', 'install', '--agent=cursor,windsurf,cline,roo', '--yes', '--json', `--brain=${brain}`], { cwd: fixture.path, streams: streams() })).toBe(0);
     await writeMarkdownDocument(join(brain, 'lessons', 'global', 'lesson-static.md'), parseMemory({
       schemaVersion: 1,
       id: 'lesson-static',

@@ -3,6 +3,18 @@ import { access } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import type { FeatureExtractionPipeline, pipeline as transformersPipeline } from '@huggingface/transformers';
 
+export {
+  BGE_M3_DOWNLOAD_BYTES,
+  BGE_M3_MODEL_ID,
+  BGE_M3_MODEL_REVISION,
+  defaultBgeM3ModelPath,
+  downloadBgeM3Model,
+  inspectBgeM3Model,
+  type BgeM3DownloadProgress,
+  type BgeM3ModelInspection,
+  type DownloadBgeM3ModelOptions,
+} from './model-download.js';
+
 export const EMBEDDING_IMPLEMENTATION_VERSION = 'taga-embedding-v1';
 
 export type EmbeddingErrorCode = 'unavailable' | 'incompatible' | 'invalid-input' | 'unknown';

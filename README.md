@@ -66,13 +66,25 @@ node dist/apps/daemon/src/main.js
 
 ### 1. 初始化 Brain
 
+在终端中直接运行交互式向导：
+
 ```bash
-taga init --brain="$HOME/.taga/brain" --agent=local --yes
+taga init
+```
+
+向导只配置全局 Brain、Agent 适配器、语义检索、LLM、后台整合和网络学习，并在最终摘要中确认。确认后会在同一次执行中完成写入；按 `Ctrl+C` 或在最终确认中选择取消不会修改配置。
+
+如果启用 BGE-M3，但本机没有兼容的 Transformers.js 模型，可以让向导下载经过固定 revision 和 SHA-256 校验的 `Xenova/bge-m3`。模型约 `2.1 GiB`，默认保存到 `<brain>/models/Xenova/bge-m3`；已完成文件会复用，未完成的 `.part` 文件会从断点继续。
+
+自动化环境使用非交互参数：
+
+```bash
+taga init --brain="$HOME/.taga/brain" --agent=codex --yes
 taga doctor --brain="$HOME/.taga/brain" --json
 taga reindex --brain="$HOME/.taga/brain"
 ```
 
-`init` 会创建标准配置和 Brain 目录。Brain 可以同时服务多个项目，不会在配置中固定某个项目路径。配置文件使用 block-style YAML，不把配置再编码成嵌套 JSON。
+`--yes`、`--no-interactive`、重定向输入输出或 `--json` 都不会启动交互界面。未提供 `--yes` 的非交互初始化只输出变更预览，不写入文件。`init` 不接受 `--project`、`--project-root` 或 `--project-id`，也不会创建项目记录或修改任何项目文件。Brain 可以同时服务多个项目；配置文件使用 block-style YAML，不把配置再编码成嵌套 JSON。
 
 进入具体项目后，可以安装该项目的 Agent 指令：
 
@@ -82,7 +94,7 @@ taga agent install --agent=codex --yes
 taga project show --json
 ```
 
-Taga 会根据 Agent 的当前工作目录向上寻找 Git 根目录，并优先使用规范化后的 `origin` 生成稳定项目身份；非 Git 目录使用规范化路径生成身份。
+Taga 会在 Agent 会话或项目命令实际运行时，根据当前工作目录向上寻找 Git 根目录，并优先使用规范化后的 `origin` 生成稳定项目身份；非 Git 目录使用规范化路径生成身份。项目不是初始化前置条件。
 
 ### 2. 记录和检索记忆
 
@@ -102,14 +114,14 @@ taga context preview --brain=./brain --agent=codex --task="fix configuration loa
 taga context start --brain=./brain --agent=codex --session-id=session-001 --task="fix configuration loading"
 ```
 
-需要写入 Agent 指令文件时，可以在初始化阶段注册适配器并注入托管指令块：
+需要写入当前项目的 Agent 指令文件时，显式执行安装命令：
 
 ```bash
-taga init --agent=claude-code,codex --yes
+taga agent install --agent=codex --yes
 taga context start --agent=codex --session-id=session-001 --inject
 ```
 
-Taga 只维护 `taga:instructions:begin/end` 标记之间的内容，重复执行初始化是幂等的；不需要注入时使用 `--no-instructions`。
+Taga 只维护 `taga:instructions:begin/end` 标记之间的内容，重复执行 `agent install` 是幂等的。`init` 不会写入这些指令块。
 
 ## CLI 命令
 
@@ -170,7 +182,7 @@ paths:
 agents:
   enabled:
     - codex
-  writeInstructions: true
+  writeInstructions: false
 
 projectResolution:
   mode: auto
@@ -251,7 +263,9 @@ taga config migrate --write
 
 ### 词法和语义检索
 
-默认使用 SQLite FTS5。启用本地语义检索前，需要自行准备 Transformers.js 格式的 BGE-M3 模型；Taga 不会在运行时自动下载模型：
+默认使用 SQLite FTS5。最简单的语义检索配置方式是在 `taga init` 中选择 `shadow` 或 `on`，然后复用本地模型或显式确认下载。普通检索、daemon 和 MCP 运行期间仍然只读取本地模型，不会隐式联网下载。
+
+也可以自行准备 Transformers.js 格式的 BGE-M3 模型：
 
 ```bash
 export TAGA_BGE_M3_MODEL_PATH="$HOME/models/Xenova/bge-m3"
@@ -408,7 +422,7 @@ pnpm run release:verify
 
 当前限制：
 
-- 语义模型权重不会提交到仓库，需要使用者自行准备本地模型。
+- BGE-M3 的 fp32 模型约 `2.1 GiB`，首次下载和首次语义索引构建需要较长时间，并占用明显的 CPU、内存和磁盘资源。
 - `0.1.0` 仍属于开发版本，公共 API、配置和存储格式不承诺长期稳定。
 
 ## 贡献

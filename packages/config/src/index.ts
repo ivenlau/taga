@@ -446,7 +446,7 @@ export function createDefaultConfig(cwd: string = resolve(process.cwd()), brain:
   return {
     schemaVersion: 4,
     paths: { brain },
-    agents: { enabled: [], writeInstructions: true },
+    agents: { enabled: [], writeInstructions: false },
     projectResolution: {
       mode: 'auto',
       preferGitRoot: true,

@@ -9,7 +9,7 @@ const root = process.cwd();
 const outDir = join(root, 'npm-package');
 
 const rootPackage = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
-const runtimeDependencyNames = ['@huggingface/transformers', '@zvec/zvec', 'better-sqlite3', 'yaml', 'zod'];
+const runtimeDependencyNames = ['@clack/prompts', '@huggingface/transformers', '@zvec/zvec', 'better-sqlite3', 'yaml', 'zod'];
 const dependencies = Object.fromEntries(
   runtimeDependencyNames.filter((name) => rootPackage.dependencies?.[name] !== undefined)
     .map((name) => [name, rootPackage.dependencies[name]]),
