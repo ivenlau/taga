@@ -513,7 +513,8 @@ function isRecallable(entry: MemoryIndexEntry, target?: Scope, options?: { reado
 }
 
 function scopeMatches(entry: MemoryIndexEntry, target?: Scope): boolean {
-  if (target === undefined || entry.scopeKind === 'global') return true;
+  if (entry.scopeKind === 'global') return true;
+  if (target === undefined) return entry.scopeKind === 'domain';
   if (target.kind === 'project') return entry.scopeKind === 'project' && entry.scopeId === target.id || entry.scopeKind === 'domain';
   if (target.kind === 'domain') return entry.scopeKind === 'domain' && entry.scopeId === target.id;
   return false;

@@ -184,7 +184,37 @@ export const migration004: Migration = {
   },
 };
 
-export const migrations: readonly Migration[] = [migration001, migration002, migration003, migration004];
+export const migration005: Migration = {
+  version: 5,
+  name: 'runtime project contexts',
+  up(database): void {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS session_contexts (
+        session_id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL,
+        project_root TEXT NOT NULL,
+        cwd TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_session_contexts_project
+        ON session_contexts(project_id, updated_at);
+
+      CREATE TABLE IF NOT EXISTS project_roots (
+        project_id TEXT NOT NULL,
+        local_path TEXT NOT NULL,
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        PRIMARY KEY(project_id, local_path)
+      );
+    `);
+  },
+};
+
+export const migrations: readonly Migration[] = [migration001, migration002, migration003, migration004, migration005];
 
 export function runMigrations(
   database: Database.Database,

@@ -20,15 +20,14 @@ function streams(): { stdout: { value: string; write(chunk: string): void }; std
   return { stdout, stderr };
 }
 
-describe('schemaVersion 3 configuration', () => {
+describe('schemaVersion 4 configuration', () => {
   it('uses override > environment > file > default and records sources', async () => {
     const fixture = await createTemporaryDirectory();
     const configPath = join(fixture.path, 'config.yaml');
     await writeFile(configPath, [
-      'schemaVersion: 3',
+      'schemaVersion: 4',
       'paths:',
       `  brain: ${join(fixture.path, 'file-brain')}`,
-      `  project: ${fixture.path}`,
       'retrieval:',
       '  semantic:',
       '    mode: off',
@@ -60,7 +59,7 @@ describe('schemaVersion 3 configuration', () => {
   });
 
   it('rejects unknown keys', () => {
-    expect(() => parseConfigText('schemaVersion: 3\nunknown: true\n', 'fixture')).toThrow(ConfigurationError);
+    expect(() => parseConfigText('schemaVersion: 4\nunknown: true\n', 'fixture')).toThrow(ConfigurationError);
   });
 
   it('migrates legacy behavior without persisting API keys or generated paths', () => {
@@ -83,6 +82,8 @@ describe('schemaVersion 3 configuration', () => {
     ].join('\n'), 'legacy');
 
     expect(parsed.legacy).toBe(true);
+    expect(parsed.file?.schemaVersion).toBe(4);
+    expect(JSON.stringify(parsed.file)).not.toContain('projectPath');
     expect(parsed.file?.agents?.enabled).toEqual(['codex']);
     expect(JSON.stringify(parsed.file)).not.toContain('should-not-survive');
     expect(JSON.stringify(parsed.file)).not.toContain('configPath');
@@ -110,7 +111,7 @@ describe('schemaVersion 3 configuration', () => {
 
   it('writes block-style YAML without secret fields', async () => {
     const fixture = await createTemporaryDirectory();
-    const loaded = await loadConfig({ cwd: fixture.path, env: {}, overrides: { paths: { brain: join(fixture.path, 'brain'), project: fixture.path } } });
+    const loaded = await loadConfig({ cwd: fixture.path, env: {}, overrides: { paths: { brain: join(fixture.path, 'brain') } } });
     const yaml = stringifyConfig(configFileFromResolved(loaded.config));
     expect(yaml).toContain('retrieval:\n  semantic:');
     expect(yaml).not.toContain('{');
@@ -148,7 +149,14 @@ describe('schemaVersion 3 configuration', () => {
     expect(await runCli(['config', 'migrate', '--json', `--brain=${brain}`], { cwd: fixture.path, env, streams: preview })).toBe(0);
     expect((JSON.parse(preview.stdout.value) as { code: string }).code).toBe('CONFIG_MIGRATION_PREVIEW');
     expect(await runCli(['config', 'migrate', '--write', '--json', `--brain=${brain}`], { cwd: fixture.path, env, streams: streams() })).toBe(0);
-    expect(await readFile(join(brain, 'config.yaml'), 'utf8')).toContain('schemaVersion: 3');
+    expect(await readFile(join(brain, 'config.yaml'), 'utf8')).toContain('schemaVersion: 4');
     await fixture.cleanup();
+  });
+
+  it('reads schemaVersion 3 as legacy and drops the configured project path', () => {
+    const parsed = parseConfigText('schemaVersion: 3\npaths:\n  brain: /tmp/brain\n  project: /tmp/project\n', 'v3');
+    expect(parsed.legacy).toBe(true);
+    expect(parsed.file).toEqual({ schemaVersion: 4, paths: { brain: '/tmp/brain' } });
+    expect(parsed.warnings[0]).toContain('paths.project is ignored');
   });
 });

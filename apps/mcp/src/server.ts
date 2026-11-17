@@ -33,9 +33,11 @@ import { MemoryPrecheckService } from '../../../packages/precheck/src/index.js';
 import { SessionContextService, observationContentHash } from '../../../packages/session/src/index.js';
 import { AgentAdapterRegistry } from '../../../packages/adapters/src/index.js';
 import { createDefaultConfig, type ResolvedConfig } from '../../../packages/config/src/index.js';
+import { resolveProjectContext, type ProjectContext } from '../../../packages/project-context/src/index.js';
 
 const searchInputSchema = z.object({
   query: z.string().min(1),
+  session_id: z.string().min(1).optional(),
   project_id: z.string().min(1).optional(),
   type: z.array(z.enum(['preferences', 'environment', 'procedures', 'lessons', 'projects'])).optional(),
   k: z.number().int().positive().max(100).optional(),
@@ -57,6 +59,7 @@ const sessionStartInputSchema = z.object({
   agent_id: z.string().min(1).default('local'),
   session_id: z.string().min(1),
   project_id: z.string().min(1).optional(),
+  project_root: z.string().min(1).optional(),
   cwd: z.string().min(1).optional(),
   task: z.string().min(1).optional(),
   token_budget: z.number().int().positive().max(10_000).optional(),
@@ -89,7 +92,8 @@ const getInputSchema = z.object({
 
 const recordInputSchema = z.object({
   type: z.enum(['preferences', 'environment', 'procedures', 'lessons', 'projects']),
-  scope: z.string().min(1),
+  scope: z.string().min(1).default('auto'),
+  session_id: z.string().min(1).optional(),
   project_id: z.string().min(1).nullable().optional(),
   title: z.string().min(1),
   body: z.string().min(1),
@@ -120,6 +124,7 @@ const feedbackInputSchema = z.object({
 
 const contextTraceInputSchema = z.object({
   agent_id: z.string().min(1).default('local'),
+  session_id: z.string().min(1).optional(),
   project_id: z.string().min(1).optional(),
   task: z.string().min(1).optional(),
 });
@@ -130,6 +135,7 @@ const precheckInputSchema = z.object({
   symbol: z.string().min(1).optional(),
   commit: z.string().min(1).optional(),
   task: z.string().min(1).optional(),
+  session_id: z.string().min(1).optional(),
   project_id: z.string().min(1).optional(),
   agent_id: z.string().min(1).optional(),
   allow_reminder: z.boolean().default(false),
@@ -445,12 +451,13 @@ export class LiteMcpServer {
     const parsed = searchInputSchema.parse(input);
     const database = new DatabaseStore(join(this.brainPath, 'taga.db'));
     try {
+      const projectId = resolveBoundProjectId(database, parsed.session_id, parsed.project_id);
       const provider = new FtsRetrievalProvider(database);
       const catalog = new Map((await this.readMemoryFiles()).map((item) => [item.memory.id, item.memory]));
       const mode = parsed.semantic_mode ?? this.config.retrieval.semantic.mode;
       const searchInput = {
         query: parsed.query,
-        ...(parsed.project_id === undefined ? {} : { scope: { kind: 'project' as const, id: parsed.project_id } }),
+        ...(projectId === undefined ? {} : { scope: { kind: 'project' as const, id: projectId } }),
         ...(parsed.include_draft === true ? { includeDraft: true } : {}),
         limit: parsed.k ?? 5,
       };
@@ -613,11 +620,28 @@ export class LiteMcpServer {
     const parsed = sessionStartInputSchema.parse(input);
     const database = new DatabaseStore(join(this.brainPath, 'taga.db'));
     try {
+      const project = await resolveProjectContext({
+        cwd: parsed.cwd ?? process.cwd(),
+        ...(parsed.project_root === undefined ? {} : { projectRoot: parsed.project_root }),
+        ...(parsed.project_id === undefined ? {} : { projectId: parsed.project_id }),
+        markerFile: this.config.projectResolution.markerFile,
+        preferGitRoot: this.config.projectResolution.preferGitRoot,
+        preferGitRemote: this.config.projectResolution.preferGitRemote,
+      });
+      database.saveProjectContext(projectRecord(project));
+      database.saveSessionContext({
+        sessionId: parsed.session_id,
+        projectId: project.id,
+        projectRoot: project.root,
+        cwd: project.cwd,
+        agentId: parsed.agent_id,
+        source: project.source,
+      });
       const result = await new SessionContextService(this.brainPath, database, this.clock).start({
         agentId: parsed.agent_id,
         sessionId: parsed.session_id,
-        ...(parsed.project_id === undefined ? {} : { projectId: parsed.project_id }),
-        ...(parsed.cwd === undefined ? {} : { cwd: parsed.cwd }),
+        projectId: project.id,
+        cwd: project.cwd,
         ...(parsed.task === undefined ? {} : { task: parsed.task }),
         ...(parsed.token_budget === undefined ? {} : { tokenBudget: parsed.token_budget }),
         refresh: parsed.refresh,
@@ -636,7 +660,8 @@ export class LiteMcpServer {
         reason: 'memory_session_start via MCP',
         payload: {
           agentId: parsed.agent_id,
-          ...(parsed.project_id === undefined ? {} : { projectId: parsed.project_id }),
+          projectId: project.id,
+          projectRoot: project.root,
           source: result.source,
           stale: result.stale,
           packId: result.pack.id,
@@ -646,7 +671,10 @@ export class LiteMcpServer {
         ok: true,
         data: {
           session_id: result.sessionId,
-          ...(result.projectId === undefined ? {} : { project_id: result.projectId }),
+          project_id: project.id,
+          project_root: project.root,
+          project_name: project.name,
+          project_source: project.source,
           pack_id: result.pack.id,
           content: result.pack.content,
           sections: result.pack.sections,
@@ -670,12 +698,13 @@ export class LiteMcpServer {
     const parsed = sessionObservationInputSchema.parse(input);
     const database = new DatabaseStore(join(this.brainPath, 'taga.db'));
     try {
+      const projectId = resolveBoundProjectId(database, parsed.session_id, parsed.project_id);
       const occurredAt = parsed.occurred_at ?? this.clock().toISOString();
       const observation = {
         id: `obs-${randomUUID()}`,
         sessionId: parsed.session_id,
         ...(parsed.task_id === undefined ? {} : { taskId: parsed.task_id }),
-        ...(parsed.project_id === undefined ? {} : { projectId: parsed.project_id }),
+        ...(projectId === undefined ? {} : { projectId }),
         occurredAt,
         sequence: parsed.sequence,
         kind: parsed.kind,
@@ -755,20 +784,27 @@ export class LiteMcpServer {
   private async contextTrace(input: Record<string, unknown>): Promise<unknown> {
     const parsed = contextTraceInputSchema.parse(input);
     const records = await this.readMemoryFiles();
-    const pack = new ContextPackBuilder().build({
-      agentId: parsed.agent_id,
-      ...(parsed.project_id === undefined ? {} : { projectId: parsed.project_id }),
-      ...(parsed.task === undefined ? {} : { task: parsed.task }),
-      channel: 'mcp',
-      candidates: records.map(({ memory, body }) => ({ memory, body })),
-    });
-    return { ok: true, data: new ContextPackBuilder().trace(pack), degraded: false, warnings: [], next_actions: [] };
+    const database = new DatabaseStore(join(this.brainPath, 'taga.db'));
+    try {
+      const projectId = resolveBoundProjectId(database, parsed.session_id, parsed.project_id);
+      const pack = new ContextPackBuilder().build({
+        agentId: parsed.agent_id,
+        ...(projectId === undefined ? {} : { projectId }),
+        ...(parsed.task === undefined ? {} : { task: parsed.task }),
+        channel: 'mcp',
+        candidates: records.map(({ memory, body }) => ({ memory, body })),
+      });
+      return { ok: true, data: new ContextPackBuilder().trace(pack), degraded: false, warnings: [], next_actions: [] };
+    } finally {
+      database.close();
+    }
   }
 
   private async precheck(input: Record<string, unknown>): Promise<unknown> {
     const parsed = precheckInputSchema.parse(input);
     const database = new DatabaseStore(join(this.brainPath, 'taga.db'));
     try {
+      const projectId = resolveBoundProjectId(database, parsed.session_id, parsed.project_id);
       const audit = new SqliteAuditLog(database);
       const notifications = new NotificationService(database, audit, {
         policy: { ...DEFAULT_PROACTIVE_POLICY, allowL2Reminders: parsed.allow_reminder },
@@ -782,7 +818,7 @@ export class LiteMcpServer {
           ...(parsed.commit === undefined ? {} : { commit: parsed.commit }),
         },
         ...(parsed.task === undefined ? {} : { task: parsed.task }),
-        ...(parsed.project_id === undefined ? {} : { projectId: parsed.project_id }),
+        ...(projectId === undefined ? {} : { projectId }),
         ...(parsed.agent_id === undefined ? {} : { agentId: parsed.agent_id }),
         ...(parsed.timeout_ms === undefined ? {} : { timeoutMs: parsed.timeout_ms }),
       });
@@ -794,38 +830,40 @@ export class LiteMcpServer {
 
   private async record(input: Record<string, unknown>): Promise<unknown> {
     const parsed = recordInputSchema.parse(input);
-    const scope = parseScope(parsed.scope);
-    const status = parsed.requested_status === 'active' ? 'draft' : parsed.requested_status;
-    const now = this.clock().toISOString();
-    const id = `mem-${randomUUID()}`;
-    const memory = parseMemory({
-      schemaVersion: 1,
-      id,
-      type: parsed.type,
-      scope,
-      projectId: parsed.project_id ?? (scope.kind === 'project' ? scope.id : null),
-      status,
-      title: parsed.title,
-      summary: parsed.body.slice(0, 240),
-      confidence: 0.5,
-      sourceTrust: parsed.actor === 'user' ? 'user_authored' : 'observed',
-      visibility: 'private',
-      created: now,
-      updated: now,
-      lastVerified: null,
-      lastRecalled: null,
-      reviewCount: 0,
-      usefulCount: 0,
-      notUsefulCount: 0,
-      expiresAt: null,
-      contentHash: contentHash(parsed.body),
-      sources: parsed.sources,
-      anchors: parsed.anchors,
-      tags: parsed.tags,
-      supersedes: null,
-    });
     const database = new DatabaseStore(join(this.brainPath, 'taga.db'));
     try {
+      const projectId = resolveBoundProjectId(database, parsed.session_id, parsed.project_id ?? undefined);
+      const scope = parseScope(parsed.scope, parsed.type, projectId);
+      if (scope.kind === 'project' && projectId !== undefined && scope.id !== projectId) throw new Error('explicit project scope conflicts with session project');
+      const status = parsed.requested_status === 'active' ? 'draft' : parsed.requested_status;
+      const now = this.clock().toISOString();
+      const id = `mem-${randomUUID()}`;
+      const memory = parseMemory({
+        schemaVersion: 1,
+        id,
+        type: parsed.type,
+        scope,
+        projectId: scope.kind === 'project' ? scope.id : null,
+        status,
+        title: parsed.title,
+        summary: parsed.body.slice(0, 240),
+        confidence: 0.5,
+        sourceTrust: parsed.actor === 'user' ? 'user_authored' : 'observed',
+        visibility: 'private',
+        created: now,
+        updated: now,
+        lastVerified: null,
+        lastRecalled: null,
+        reviewCount: 0,
+        usefulCount: 0,
+        notUsefulCount: 0,
+        expiresAt: null,
+        contentHash: contentHash(parsed.body),
+        sources: parsed.sources,
+        anchors: parsed.anchors,
+        tags: parsed.tags,
+        supersedes: null,
+      });
       const repository = new MarkdownMemoryRepository(this.brainPath);
       repository.setBody(memory.id, parsed.body);
       const saved = await new GovernanceService(repository, new SqliteAuditLog(database), this.clock)
@@ -849,10 +887,11 @@ export class LiteMcpServer {
     const parsed = feedbackInputSchema.parse(input);
     const database = new DatabaseStore(join(this.brainPath, 'taga.db'));
     try {
+      const projectId = resolveBoundProjectId(database, parsed.session_id, parsed.project_id);
       const repository = new MarkdownMemoryRepository(this.brainPath);
       const updated = await new GovernanceService(repository, new SqliteAuditLog(database), this.clock)
         .feedback(parsed.memory_id, parsed.kind, { actor: 'agent' }, parsed.note ?? 'feedback via MCP', {
-          ...(parsed.project_id === undefined ? {} : { projectId: parsed.project_id }),
+          ...(projectId === undefined ? {} : { projectId }),
           ...(parsed.session_id === undefined ? {} : { sessionId: parsed.session_id }),
         });
       const body = await this.readMemoryFiles().then((records) => records.find((record) => record.memory.id === updated.id)?.body ?? updated.summary);
@@ -867,7 +906,7 @@ export class LiteMcpServer {
         enqueueLearnCorrection(database, {
           memoryId: parsed.memory_id,
           ...(parsed.note === undefined ? {} : { note: parsed.note }),
-          ...(parsed.project_id === undefined ? {} : { project: parsed.project_id }),
+          ...(projectId === undefined ? {} : { project: projectId }),
         });
       }
       return { ok: true, data: { memory_id: updated.id, kind: parsed.kind, useful_count: updated.usefulCount, not_useful_count: updated.notUsefulCount }, degraded: false, warnings: [], next_actions: [] };
@@ -889,10 +928,16 @@ export class LiteMcpServer {
 
   private async injectionStatus(memory: Memory): Promise<'injected' | 'not_injected' | 'unknown'> {
     const registry = new AgentAdapterRegistry();
+    const project = await resolveProjectContext({
+      cwd: process.cwd(),
+      markerFile: this.config.projectResolution.markerFile,
+      preferGitRoot: this.config.projectResolution.preferGitRoot,
+      preferGitRemote: this.config.projectResolution.preferGitRemote,
+    });
     const targets = this.config.agents.enabled.flatMap((configuredId) => {
       const id = configuredId === 'claude' ? 'claude-code' : configuredId;
-      return registry.get(id)?.staticTargets(this.config.paths.project)
-        ?? [join(this.config.paths.project, id === 'claude-code' ? 'CLAUDE.md' : 'AGENTS.md')];
+      return registry.get(id)?.staticTargets(project.root)
+        ?? [join(project.root, id === 'claude-code' ? 'CLAUDE.md' : 'AGENTS.md')];
     });
     if (targets.length === 0) return 'unknown';
     for (const target of targets) {
@@ -911,14 +956,43 @@ export function toolList(): readonly McpTool[] {
   return tools;
 }
 
-function parseScope(value: string): Memory['scope'] {
+function parseScope(value: string, type: Memory['type'], projectId?: string): Memory['scope'] {
+  if (value === 'auto') {
+    if (type === 'preferences') return { kind: 'global' };
+    if (projectId !== undefined) return { kind: 'project', id: projectId };
+    if (type === 'projects') throw new Error('project memory requires a project session or explicit project scope');
+    return { kind: 'global' };
+  }
+  if (value === 'project') {
+    if (projectId === undefined) throw new Error('project scope requires a project session or explicit project_id');
+    return { kind: 'project', id: projectId };
+  }
   if (value === 'global') return { kind: 'global' };
   const separator = value.indexOf(':');
-  if (separator < 1 || separator === value.length - 1) throw new Error('scope must be global, domain:<id>, or project:<id>');
+  if (separator < 1 || separator === value.length - 1) throw new Error('scope must be auto, global, project, domain:<id>, or project:<id>');
   const kind = value.slice(0, separator);
   const id = value.slice(separator + 1);
-  if (kind !== 'domain' && kind !== 'project') throw new Error('scope must be global, domain:<id>, or project:<id>');
+  if (kind !== 'domain' && kind !== 'project') throw new Error('scope must be auto, global, project, domain:<id>, or project:<id>');
   return { kind, id };
+}
+
+function resolveBoundProjectId(database: DatabaseStore, sessionId?: string, explicitProjectId?: string): string | undefined {
+  if (sessionId === undefined) return explicitProjectId;
+  const session = database.getSessionContext(sessionId);
+  if (session === null) throw new Error(`unknown session_id: ${sessionId}`);
+  if (explicitProjectId !== undefined && explicitProjectId !== session.projectId) throw new Error('explicit project_id conflicts with session project');
+  return session.projectId;
+}
+
+function projectRecord(project: ProjectContext): Parameters<DatabaseStore['saveProjectContext']>[0] {
+  return {
+    id: project.id,
+    root: project.root,
+    name: project.name,
+    source: project.source,
+    canonicalKey: project.canonicalKey,
+    ...(project.gitRemote === undefined ? {} : { gitRemote: project.gitRemote }),
+  };
 }
 
 async function visit(path: string, result: string[]): Promise<void> {

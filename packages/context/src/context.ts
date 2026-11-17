@@ -65,11 +65,11 @@ export class ContextPackBuilder {
         });
         continue;
       }
-      if (input.projectId !== undefined && memory.scope.kind === 'project' && memory.scope.id !== input.projectId) {
+      if (memory.scope.kind === 'project' && (input.projectId === undefined || memory.scope.id !== input.projectId)) {
         decisions.push({
           memoryId: memory.id,
           decision: 'excluded',
-          reason: ['project-scope-mismatch'],
+          reason: [input.projectId === undefined ? 'project-context-missing' : 'project-scope-mismatch'],
         });
         continue;
       }

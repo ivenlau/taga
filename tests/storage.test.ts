@@ -12,7 +12,7 @@ describe('DatabaseStore', () => {
 
     const second = new DatabaseStore(databasePath);
     expect(second.getMetadata('brain.version')).toBe('1');
-    expect(second.integrityCheck()).toMatchObject({ ok: true, schemaVersion: 4 });
+    expect(second.integrityCheck()).toMatchObject({ ok: true, schemaVersion: 5 });
     second.close();
     await fixture.cleanup();
   });

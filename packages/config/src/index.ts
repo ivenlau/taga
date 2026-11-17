@@ -12,7 +12,19 @@ const nonEmptyString = z.string().min(1);
 
 const pathsFileSchema = z.object({
   brain: nonEmptyString.optional(),
+}).strict();
+
+const pathsFileV3Schema = z.object({
+  brain: nonEmptyString.optional(),
   project: nonEmptyString.optional(),
+}).strict();
+
+const projectResolutionFileSchema = z.object({
+  mode: z.literal('auto').optional(),
+  preferGitRoot: z.boolean().optional(),
+  preferGitRemote: z.boolean().optional(),
+  markerFile: nonEmptyString.optional(),
+  unknownProjectPolicy: z.literal('global-only').optional(),
 }).strict();
 
 const agentsFileSchema = z.object({
@@ -69,7 +81,7 @@ const reflectionFileSchema = z.object({
 
 export const configFileV3Schema = z.object({
   schemaVersion: z.literal(3),
-  paths: pathsFileSchema.optional(),
+  paths: pathsFileV3Schema.optional(),
   agents: agentsFileSchema.optional(),
   retrieval: retrievalFileSchema.optional(),
   llm: llmFileSchema.optional(),
@@ -79,6 +91,20 @@ export const configFileV3Schema = z.object({
 }).strict();
 
 export type ConfigFileV3 = z.infer<typeof configFileV3Schema>;
+
+export const configFileV4Schema = z.object({
+  schemaVersion: z.literal(4),
+  paths: pathsFileSchema.optional(),
+  agents: agentsFileSchema.optional(),
+  projectResolution: projectResolutionFileSchema.optional(),
+  retrieval: retrievalFileSchema.optional(),
+  llm: llmFileSchema.optional(),
+  consolidation: consolidationFileSchema.optional(),
+  learning: learningFileSchema.optional(),
+  reflection: reflectionFileSchema.optional(),
+}).strict();
+
+export type ConfigFileV4 = z.infer<typeof configFileV4Schema>;
 
 const legacyAgentSchema = z.object({
   id: nonEmptyString,
@@ -130,14 +156,20 @@ const legacyConfigSchema = z.object({
 }).passthrough();
 
 export interface ResolvedConfig {
-  readonly schemaVersion: 3;
+  readonly schemaVersion: 4;
   readonly paths: {
     readonly brain: string;
-    readonly project: string;
   };
   readonly agents: {
     readonly enabled: readonly string[];
     readonly writeInstructions: boolean;
+  };
+  readonly projectResolution: {
+    readonly mode: 'auto';
+    readonly preferGitRoot: boolean;
+    readonly preferGitRemote: boolean;
+    readonly markerFile: string;
+    readonly unknownProjectPolicy: 'global-only';
   };
   readonly retrieval: {
     readonly semantic: {
@@ -179,8 +211,9 @@ export interface ResolvedConfig {
 }
 
 export interface ConfigOverrides {
-  readonly paths?: { readonly brain?: string; readonly project?: string };
+  readonly paths?: { readonly brain?: string };
   readonly agents?: { readonly enabled?: readonly string[]; readonly writeInstructions?: boolean };
+  readonly projectResolution?: { readonly mode?: 'auto'; readonly preferGitRoot?: boolean; readonly preferGitRemote?: boolean; readonly markerFile?: string; readonly unknownProjectPolicy?: 'global-only' };
   readonly retrieval?: {
     readonly semantic?: { readonly mode?: FeatureMode; readonly modelPath?: string };
   };
@@ -211,7 +244,7 @@ export interface LoadedConfig {
   readonly legacy: boolean;
   readonly warnings: readonly string[];
   readonly sources: Readonly<Record<string, ConfigSource>>;
-  readonly file: ConfigFileV3 | null;
+  readonly file: ConfigFileV4 | null;
 }
 
 export class ConfigurationError extends Error {
@@ -262,7 +295,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Loade
   };
 }
 
-export function parseConfigText(raw: string | null, source = 'configuration'): { readonly file: ConfigFileV3 | null; readonly legacy: boolean; readonly warnings: readonly string[] } {
+export function parseConfigText(raw: string | null, source = 'configuration'): { readonly file: ConfigFileV4 | null; readonly legacy: boolean; readonly warnings: readonly string[] } {
   if (raw === null) return { file: null, legacy: false, warnings: [] };
   let value: unknown;
   try {
@@ -270,17 +303,19 @@ export function parseConfigText(raw: string | null, source = 'configuration'): {
   } catch (error) {
     throw new ConfigurationError(`${source} is not valid YAML`, [error instanceof Error ? error.message : String(error)]);
   }
+  const v4 = configFileV4Schema.safeParse(value);
+  if (v4.success) return { file: v4.data, legacy: false, warnings: [] };
   const v3 = configFileV3Schema.safeParse(value);
-  if (v3.success) return { file: v3.data, legacy: false, warnings: [] };
+  if (v3.success) return { file: migrateV3Config(v3.data), legacy: true, warnings: ['schemaVersion 3 is deprecated; paths.project is ignored at runtime; run taga config migrate --write'] };
   const legacy = legacyConfigSchema.safeParse(value);
   if (legacy.success) {
     const migrated = migrateLegacyConfig(legacy.data);
     return { file: migrated.file, legacy: true, warnings: migrated.warnings };
   }
-  throw new ConfigurationError(`${source} failed configuration validation`, formatIssues(v3.error));
+  throw new ConfigurationError(`${source} failed configuration validation`, formatIssues(v4.error));
 }
 
-export function migrateLegacyConfig(legacy: z.infer<typeof legacyConfigSchema>): { readonly file: ConfigFileV3; readonly warnings: readonly string[] } {
+export function migrateLegacyConfig(legacy: z.infer<typeof legacyConfigSchema>): { readonly file: ConfigFileV4; readonly warnings: readonly string[] } {
   const warnings = [`schemaVersion ${legacy.schemaVersion} is deprecated; run taga config migrate --write`];
   const legacyLlm = legacy.llm ?? legacy.consolidation?.llm;
   if (legacy.llm?.apiKey !== undefined || legacy.consolidation?.llm?.apiKey !== undefined) {
@@ -294,8 +329,8 @@ export function migrateLegacyConfig(legacy: z.infer<typeof legacyConfigSchema>):
   if (legacy.remoteModelAllowed !== undefined) warnings.push('legacy remoteModelAllowed is no longer used');
   return {
     file: {
-      schemaVersion: 3,
-      paths: { brain: legacy.brainPath, project: legacy.projectPath },
+      schemaVersion: 4,
+      paths: { brain: legacy.brainPath },
       agents: { enabled: legacy.agents.map((agent) => agent.id), writeInstructions: true },
       retrieval: {
         semantic: {
@@ -342,11 +377,25 @@ export function migrateLegacyConfig(legacy: z.infer<typeof legacyConfigSchema>):
   };
 }
 
-export function configFileFromResolved(config: ResolvedConfig): ConfigFileV3 {
+function migrateV3Config(config: ConfigFileV3): ConfigFileV4 {
   return {
-    schemaVersion: 3,
-    paths: { brain: config.paths.brain, project: config.paths.project },
+    schemaVersion: 4,
+    ...(config.paths?.brain === undefined ? {} : { paths: { brain: config.paths.brain } }),
+    ...(config.agents === undefined ? {} : { agents: config.agents }),
+    ...(config.retrieval === undefined ? {} : { retrieval: config.retrieval }),
+    ...(config.llm === undefined ? {} : { llm: config.llm }),
+    ...(config.consolidation === undefined ? {} : { consolidation: config.consolidation }),
+    ...(config.learning === undefined ? {} : { learning: config.learning }),
+    ...(config.reflection === undefined ? {} : { reflection: config.reflection }),
+  };
+}
+
+export function configFileFromResolved(config: ResolvedConfig): ConfigFileV4 {
+  return {
+    schemaVersion: 4,
+    paths: { brain: config.paths.brain },
     agents: { enabled: [...config.agents.enabled], writeInstructions: config.agents.writeInstructions },
+    projectResolution: { ...config.projectResolution },
     retrieval: {
       semantic: { mode: config.retrieval.semantic.mode, ...(config.retrieval.semantic.modelPath.length === 0 ? {} : { modelPath: config.retrieval.semantic.modelPath }) },
     },
@@ -369,7 +418,7 @@ export function configFileFromResolved(config: ResolvedConfig): ConfigFileV3 {
   };
 }
 
-export function stringifyConfig(file: ConfigFileV3): string {
+export function stringifyConfig(file: ConfigFileV4): string {
   return stringifyYaml(file, { collectionStyle: 'block', lineWidth: 0 });
 }
 
@@ -393,10 +442,18 @@ export function configDirectory(path: string): string {
 }
 
 export function createDefaultConfig(cwd: string = resolve(process.cwd()), brain: string = defaultBrainPath(process.env)): ResolvedConfig {
+  void cwd;
   return {
-    schemaVersion: 3,
-    paths: { brain, project: cwd },
+    schemaVersion: 4,
+    paths: { brain },
     agents: { enabled: [], writeInstructions: true },
+    projectResolution: {
+      mode: 'auto',
+      preferGitRoot: true,
+      preferGitRemote: true,
+      markerFile: join('.taga', 'project.yaml'),
+      unknownProjectPolicy: 'global-only',
+    },
     retrieval: {
       semantic: { mode: 'off', modelPath: '' },
     },
@@ -412,7 +469,7 @@ export function createDefaultConfig(cwd: string = resolve(process.cwd()), brain:
   };
 }
 
-function resolveLayers(defaults: ResolvedConfig, file: ConfigFileV3 | null, env: NodeJS.ProcessEnv, overrides: ConfigOverrides, cwd: string, fileBase: string): { readonly config: ResolvedConfig; readonly sources: Readonly<Record<string, ConfigSource>> } {
+function resolveLayers(defaults: ResolvedConfig, file: ConfigFileV4 | null, env: NodeJS.ProcessEnv, overrides: ConfigOverrides, cwd: string, fileBase: string): { readonly config: ResolvedConfig; readonly sources: Readonly<Record<string, ConfigSource>> } {
   const sources: Record<string, ConfigSource> = {};
   const pick = <T>(path: string, overrideValue: T | undefined, envValue: T | undefined, fileValue: T | undefined, defaultValue: T): T => {
     if (overrideValue !== undefined) { sources[path] = 'override'; return overrideValue; }
@@ -422,16 +479,22 @@ function resolveLayers(defaults: ResolvedConfig, file: ConfigFileV3 | null, env:
     return defaultValue;
   };
   const brain = resolveLayeredPath('paths.brain', pick('paths.brain', overrides.paths?.brain, optionalString(env, 'TAGA_BRAIN'), file?.paths?.brain, defaults.paths.brain), sources, cwd, fileBase);
-  const project = resolveLayeredPath('paths.project', pick('paths.project', overrides.paths?.project, optionalString(env, 'TAGA_PROJECT'), file?.paths?.project, defaults.paths.project), sources, cwd, fileBase);
   const dailyCap = pick('llm.dailyCap', overrides.llm?.dailyCap, optionalPositiveInt(env, 'TAGA_LLM_DAILY_CAP'), file?.llm?.dailyCap, 0);
   const apiKey = optionalSecret(env, 'TAGA_LLM_API_KEY');
   if (apiKey !== undefined) sources['llm.apiKey'] = 'environment';
   const config: ResolvedConfig = {
-    schemaVersion: 3,
-    paths: { brain, project },
+    schemaVersion: 4,
+    paths: { brain },
     agents: {
       enabled: pick('agents.enabled', overrides.agents?.enabled, undefined, file?.agents?.enabled, defaults.agents.enabled),
       writeInstructions: pick('agents.writeInstructions', overrides.agents?.writeInstructions, undefined, file?.agents?.writeInstructions, defaults.agents.writeInstructions),
+    },
+    projectResolution: {
+      mode: pick('projectResolution.mode', overrides.projectResolution?.mode, undefined, file?.projectResolution?.mode, defaults.projectResolution.mode),
+      preferGitRoot: pick('projectResolution.preferGitRoot', overrides.projectResolution?.preferGitRoot, optionalBoolean(env, 'TAGA_PROJECT_PREFER_GIT_ROOT'), file?.projectResolution?.preferGitRoot, defaults.projectResolution.preferGitRoot),
+      preferGitRemote: pick('projectResolution.preferGitRemote', overrides.projectResolution?.preferGitRemote, optionalBoolean(env, 'TAGA_PROJECT_PREFER_GIT_REMOTE'), file?.projectResolution?.preferGitRemote, defaults.projectResolution.preferGitRemote),
+      markerFile: pick('projectResolution.markerFile', overrides.projectResolution?.markerFile, optionalString(env, 'TAGA_PROJECT_MARKER_FILE'), file?.projectResolution?.markerFile, defaults.projectResolution.markerFile),
+      unknownProjectPolicy: pick('projectResolution.unknownProjectPolicy', overrides.projectResolution?.unknownProjectPolicy, undefined, file?.projectResolution?.unknownProjectPolicy, defaults.projectResolution.unknownProjectPolicy),
     },
     retrieval: {
       semantic: {

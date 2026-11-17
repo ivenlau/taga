@@ -105,7 +105,7 @@ export class MemoryPrecheckService {
     const diagnostics: string[] = [];
     const items: PrecheckItem[] = [];
     for (const memory of memories) {
-      if (input.projectId !== undefined && memory.scope.kind === 'project' && memory.scope.id !== input.projectId) continue;
+      if (memory.scope.kind === 'project' && (input.projectId === undefined || memory.scope.id !== input.projectId)) continue;
       const anchor = await resolveMemoryAnchors(memory, input.target, cwd, this.anchorProvider);
       if (anchor.state === 'stale') {
         diagnostics.push(`stale-anchor:${memory.id}:${anchor.reason}`);

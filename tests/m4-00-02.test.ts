@@ -184,12 +184,13 @@ describe('M4 hybrid and progressive retrieval', () => {
     const memory = createMemory('memory-progressive', 'Retry network request', '0123456789abcdef');
     provider.upsert(memory, '0123456789abcdef');
     const unavailable: SemanticRetriever = { search: () => Promise.reject(new Error('embedding unavailable')) };
-    const hybrid = await provider.searchHybrid({ query: 'retry', limit: 1 }, unavailable);
+    const scope = { kind: 'project' as const, id: 'project-m4' };
+    const hybrid = await provider.searchHybrid({ query: 'retry', scope, limit: 1 }, unavailable);
     expect(hybrid.degraded).toBe(true);
     expect(hybrid.items[0]?.matchReason).toContain('semantic:unavailable');
 
     const progressive = new ProgressiveRecallService(provider);
-    expect(progressive.index({ query: 'retry', limit: 1 })[0]).toMatchObject({ id: 'memory-progressive', title: 'Retry network request' });
+    expect(progressive.index({ query: 'retry', scope, limit: 1 })[0]).toMatchObject({ id: 'memory-progressive', title: 'Retry network request' });
     expect(progressive.timeline('memory-progressive', 1)).toHaveLength(1);
     expect(progressive.details(['memory-progressive'], 5)[0]).toMatchObject({ body: '01234', truncated: true, sources: ['test:m4.test.ts'] });
     database.close();

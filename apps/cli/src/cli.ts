@@ -1,8 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { access, mkdir, readFile, readdir } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { promisify } from 'node:util';
-import { execFile } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -87,6 +85,7 @@ import {
   upsertManagedBlock,
 } from '../../../packages/storage/src/index.js';
 import { SessionContextService } from '../../../packages/session/src/index.js';
+import { resolveProjectContext, type ProjectContext } from '../../../packages/project-context/src/index.js';
 
 export const exitCodes = {
   success: 0,
@@ -210,6 +209,8 @@ async function dispatch(args: ParsedArgs, context: CliContext): Promise<CliRespo
       return daemonCommand(subcommand, context);
     case 'agent':
       return agentCommand(subcommand, args.positionals, context);
+    case 'project':
+      return projectCommand(subcommand, context);
     case 'reindex':
       return reindexCommand(context);
     case 'brain':
@@ -283,11 +284,12 @@ async function initCommand(context: CliContext): Promise<CliResponse> {
     && context.options.get('yes') !== true
     && context.options.get('no-interactive') !== true;
   let brainPath = context.brainPath;
-  let projectPath = resolve(context.cwd, optionString(options, 'project') ?? context.config.paths.project);
+  let projectPath = resolve(context.cwd, optionString(options, 'project-root') ?? optionString(options, 'project') ?? context.cwd);
   if (interactive) {
     process.stdout.write('\n== Taga 引导式配置 ==（回车保留默认值；API Key 仅从 TAGA_LLM_API_KEY 读取）\n');
     brainPath = resolve(context.cwd, await promptValue('Brain 数据目录', brainPath));
     projectPath = resolve(context.cwd, await promptValue('项目目录', projectPath));
+    options.set('project-root', projectPath);
     const configuredAgents = context.config.agents.enabled.length === 0 ? 'claude-code,codex' : context.config.agents.enabled.join(',');
     const agentsAnswer = await promptValue('注册哪些 agent 适配器（逗号分隔：claude-code,codex,pi,opencode,cursor,windsurf,cline,roo,local）', configuredAgents);
     const semanticOn = await promptConfirm('启用本地语义检索（BGE-M3）', context.config.retrieval.semantic.mode !== 'off');
@@ -320,7 +322,14 @@ async function initCommand(context: CliContext): Promise<CliResponse> {
     options.set('reflect-file-mode', reflectOn ? 'on' : 'off');
     options.set('learn-file-allow-network', learnNetwork ? 'true' : 'false');
   }
-  const projectId = await projectIdentity(projectPath);
+  const project = await resolveProjectContext({
+    cwd: projectPath,
+    ...(optionString(options, 'project-root') === undefined && optionString(options, 'project') === undefined ? {} : { projectRoot: optionString(options, 'project-root') ?? optionString(options, 'project') as string }),
+    ...(optionString(options, 'project-id') === undefined ? {} : { projectId: optionString(options, 'project-id') as string }),
+    markerFile: context.config.projectResolution.markerFile,
+  });
+  projectPath = project.root;
+  const projectId = project.id;
   const registry = new AgentAdapterRegistry();
   const requested = requestedAgentIds(optionString(options, 'agent') ?? (context.config.agents.enabled.length === 0 ? 'local' : context.config.agents.enabled.join(',')), registry);
   const agents = requested.map((agentId) => {
@@ -335,7 +344,7 @@ async function initCommand(context: CliContext): Promise<CliResponse> {
   const consolidationMode = optionString(options, 'consolidation-file-mode');
   const reflectionMode = optionString(options, 'reflect-file-mode');
   const overrides: ConfigOverrides = {
-    paths: { brain: brainPath, project: projectPath },
+    paths: { brain: brainPath },
     agents: { enabled: agents.map((agent) => agent.id), writeInstructions: options.get('no-instructions') !== true },
     retrieval: {
       semantic: {
@@ -396,6 +405,7 @@ async function initCommand(context: CliContext): Promise<CliResponse> {
   await mkdir(join(brainPath, 'global'), { recursive: true });
   const database = new DatabaseStore(join(brainPath, 'taga.db'));
   try {
+    database.saveProjectContext(projectRecord(project));
     for (const agent of agents) database.upsertMetadata(`pack:enabled:${agent.id}`, 'true');
     if (database.getMetadata('brain.initialized') === null) {
       await new SqliteAuditLog(database).append({
@@ -447,15 +457,15 @@ async function configCommand(subcommand: string | undefined, context: CliContext
   }
   if (subcommand === 'migrate') {
     if (!context.loadedConfig.legacy || context.loadedConfig.file === null) {
-      return { ok: true, code: 'CONFIG_CURRENT', message: 'configuration already uses schemaVersion 3', data: { configPath: context.configPath } };
+      return { ok: true, code: 'CONFIG_CURRENT', message: 'configuration already uses schemaVersion 4', data: { configPath: context.configPath } };
     }
-    const preview = { from: context.loadedConfig.loadedFrom, to: context.configPath, schemaVersion: 3 };
+    const preview = { from: context.loadedConfig.loadedFrom, to: context.configPath, schemaVersion: 4 };
     if (context.options.get('write') !== true) {
       return { ok: true, code: 'CONFIG_MIGRATION_PREVIEW', message: 'configuration migration preview ready; rerun with --write', data: preview, warnings: context.loadedConfig.warnings };
     }
     await mkdir(configDirectory(context.configPath), { recursive: true });
     await atomicWrite(context.configPath, stringifyConfig(context.loadedConfig.file));
-    return { ok: true, code: 'CONFIG_MIGRATED', message: 'configuration migrated to schemaVersion 3', data: preview, warnings: context.loadedConfig.warnings };
+    return { ok: true, code: 'CONFIG_MIGRATED', message: 'configuration migrated to schemaVersion 4', data: preview, warnings: context.loadedConfig.warnings };
   }
   throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', 'supported config commands: validate, show, migrate');
 }
@@ -628,8 +638,10 @@ async function developmentCommand(subcommand: string | undefined, positionals: r
   const database = new DatabaseStore(context.databasePath);
   try {
     const service = new DevelopmentEvidenceService(database);
-    const projectPath = resolve(context.cwd, optionString(context.options, 'project') ?? context.cwd);
-    const projectId = optionString(context.options, 'project-id') ?? await projectIdentity(projectPath);
+    const project = await resolveCliProject(context);
+    const projectPath = project.root;
+    const projectId = project.id;
+    database.saveProjectContext(projectRecord(project));
     if (subcommand === 'probe') {
       return { ok: true, code: 'DEVELOPMENT_PROBED', message: 'environment probe completed', data: await service.probeEnvironment(projectPath, projectId) };
     }
@@ -1031,7 +1043,7 @@ async function memoryCommand(
   if (lifecycle.type === 'forget') {
     const database = new DatabaseStore(context.databasePath);
     try {
-      const targetPaths = configuredAgentTargets(context).flatMap((agent) => agent.targetPaths);
+      const targetPaths = (await configuredAgentTargets(context)).flatMap((agent) => agent.targetPaths);
       const result = await new RecoveryService(context.brainPath, database).forget(id, true, 'forget from CLI', targetPaths);
       enqueueSemanticRemove(database, id);
       await new SqliteAuditLog(database).append({
@@ -1082,15 +1094,18 @@ async function contextCommand(subcommand: string | undefined, context: CliContex
   }
   const repository = new MarkdownMemoryRepository(context.brainPath);
   const records = await repository.records();
+  const project = await resolveCliProject(context);
   if (subcommand === 'start') {
     const sessionId = optionString(context.options, 'session-id');
     if (sessionId === undefined) throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', 'context start requires --session-id=<id>');
     const database = new DatabaseStore(context.databasePath);
     try {
+      database.saveProjectContext(projectRecord(project));
+      database.saveSessionContext({ sessionId, projectId: project.id, projectRoot: project.root, cwd: project.cwd, agentId: optionString(context.options, 'agent') ?? 'local', source: project.source });
       const result = await new SessionContextService(context.brainPath, database).start({
         agentId: optionString(context.options, 'agent') ?? 'local',
         sessionId,
-        ...(optionString(context.options, 'project') === undefined ? {} : { projectId: optionString(context.options, 'project') as string }),
+        projectId: project.id,
         ...(optionString(context.options, 'task') === undefined ? {} : { task: optionString(context.options, 'task') as string }),
         cwd: context.cwd,
         refresh: context.options.get('refresh') === true,
@@ -1098,7 +1113,7 @@ async function contextCommand(subcommand: string | undefined, context: CliContex
       let injectedPath: string | undefined;
       if (context.options.get('inject') === true) {
         const selectedAgent = optionString(context.options, 'agent') ?? 'local';
-        const target = optionString(context.options, 'file') ?? configuredAgentTargets(context).find((agent) => agent.id === selectedAgent || (selectedAgent === 'claude' && agent.id === 'claude-code'))?.targetPaths[0];
+        const target = optionString(context.options, 'file') ?? (await configuredAgentTargets(context, project)).find((agent) => agent.id === selectedAgent || (selectedAgent === 'claude' && agent.id === 'claude-code'))?.targetPaths[0];
         if (target === undefined) throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', 'context start --inject requires --file=<path> or an initialized agent target');
         injectedPath = resolve(context.cwd, target);
         await new ContextPackBuilder().inject(injectedPath, result.pack);
@@ -1117,7 +1132,7 @@ async function contextCommand(subcommand: string | undefined, context: CliContex
       database.close();
     }
   }
-  const projectId = optionString(context.options, 'project');
+  const projectId = project.id;
   const builder = new ContextPackBuilder();
   const pack = builder.build({
     agentId: optionString(context.options, 'agent') ?? 'local',
@@ -1153,6 +1168,8 @@ async function precheckCommand(context: CliContext): Promise<CliResponse> {
   if (file === undefined && symbol === undefined && commit === undefined) throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', 'precheck requires --file, --symbol, or --commit');
   const database = new DatabaseStore(context.databasePath);
   try {
+    const project = await resolveCliProject(context);
+    database.saveProjectContext(projectRecord(project));
     const audit = new SqliteAuditLog(database);
     const notifications = new NotificationService(database, audit, {
       policy: { ...DEFAULT_PROACTIVE_POLICY, allowL2Reminders: context.options.get('remind') === true },
@@ -1165,7 +1182,7 @@ async function precheckCommand(context: CliContext): Promise<CliResponse> {
         ...(commit === undefined ? {} : { commit }),
       },
       ...(optionString(context.options, 'task') === undefined ? {} : { task: optionString(context.options, 'task') as string }),
-      ...(optionString(context.options, 'project') === undefined ? {} : { projectId: optionString(context.options, 'project') as string }),
+      projectId: project.id,
       ...(optionString(context.options, 'agent') === undefined ? {} : { agentId: optionString(context.options, 'agent') as string }),
       cwd: context.cwd,
       ...(numberOption(context.options, 'timeout-ms') === undefined ? {} : { timeoutMs: numberOption(context.options, 'timeout-ms') as number }),
@@ -1178,7 +1195,7 @@ async function precheckCommand(context: CliContext): Promise<CliResponse> {
 
 async function injectCommand(subcommand: string | undefined, context: CliContext): Promise<CliResponse> {
   const selectedAgent = optionString(context.options, 'agent');
-  const targets = configuredAgentTargets(context)
+  const targets = (await configuredAgentTargets(context))
     .filter((agent) => selectedAgent === undefined || agent.id === selectedAgent || (selectedAgent === 'claude' && agent.id === 'claude-code'))
     .flatMap((agent) => agent.targetPaths);
   if (subcommand === 'ls') {
@@ -1300,14 +1317,35 @@ async function agentCommand(subcommand: string | undefined, positionals: readonl
     const detections = await registry.detect();
     const filtered = selected === undefined ? detections : detections.filter((detection) => detection.id === (selected === 'claude' ? 'claude-code' : selected));
     if (selected !== undefined && filtered.length === 0) throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', `unsupported agent: ${selected}`);
-    const projectPath = resolve(context.cwd, optionString(context.options, 'project') ?? context.cwd);
-    return { ok: true, code: 'AGENT_STATUS', message: 'agent capabilities detected', data: filtered.map((detection) => ({ ...detection, targetPaths: registry.get(detection.id)?.staticTargets(projectPath) ?? [] })) };
+    const project = await resolveCliProject(context);
+    return { ok: true, code: 'AGENT_STATUS', message: 'agent capabilities detected', data: filtered.map((detection) => ({ ...detection, targetPaths: registry.get(detection.id)?.staticTargets(project.root) ?? [] })) };
   }
   if (subcommand === 'targets') {
-    const projectPath = resolve(context.cwd, optionString(context.options, 'project') ?? context.cwd);
+    const project = await resolveCliProject(context);
     const adapters = selected === undefined ? registry.all() : [registry.get(selected)].filter((adapter) => adapter !== null);
     if (adapters.length === 0) throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', `unsupported agent: ${selected}`);
-    return { ok: true, code: 'AGENT_TARGETS', message: 'agent static targets loaded', data: adapters.map((adapter) => ({ id: adapter.id, targets: adapter.staticTargets(projectPath) })) };
+    return { ok: true, code: 'AGENT_TARGETS', message: 'agent static targets loaded', data: adapters.map((adapter) => ({ id: adapter.id, targets: adapter.staticTargets(project.root) })) };
+  }
+  if (subcommand === 'install') {
+    const project = await resolveCliProject(context);
+    const requested = requestedAgentIds(selected ?? (context.config.agents.enabled.length === 0 ? 'local' : context.config.agents.enabled.join(',')), registry);
+    const targets = requested.map((id) => ({ id, targetPaths: agentTargetPaths(registry, id, project.root) }));
+    const preview = { project, agents: targets };
+    if (!isConfirmed(context.options)) throw new CliFailure(exitCodes.confirmationRequired, 'CONFIRMATION_REQUIRED', 'agent install preview is ready; rerun with --yes', preview);
+    for (const target of targets.flatMap((item) => item.targetPaths)) {
+      await upsertManagedBlock(target, DEFAULT_AGENT_INSTRUCTIONS, { begin: instructionBlockBegin, end: instructionBlockEnd });
+    }
+    const enabled = [...new Set([...context.config.agents.enabled, ...requested])];
+    const updated = await loadConfig({ cwd: context.cwd, env: context.env, configPath: context.configPath, overrides: { agents: { enabled } } });
+    await mkdir(configDirectory(context.configPath), { recursive: true });
+    await atomicWrite(context.configPath, stringifyConfig(configFileFromResolved(updated.config)));
+    const database = new DatabaseStore(context.databasePath);
+    try {
+      database.saveProjectContext(projectRecord(project));
+    } finally {
+      database.close();
+    }
+    return { ok: true, code: 'AGENT_INSTALLED', message: 'agent instructions installed for current project', data: preview };
   }
   if (subcommand === 'ingest') {
     if (selected !== undefined && registry.get(selected) === null) throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', `unsupported agent: ${selected}`);
@@ -1322,12 +1360,27 @@ async function agentCommand(subcommand: string | undefined, positionals: readonl
   if (subcommand === 'verify') {
     if (selected === undefined) throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', 'agent verify requires --agent=<id>');
     if (!isConfirmed(context.options)) throw new CliFailure(exitCodes.confirmationRequired, 'CONFIRMATION_REQUIRED', 'real-agent verification reads a local session and requires --yes');
-    const projectPath = resolve(context.cwd, optionString(context.options, 'project') ?? context.cwd);
-    const projectId = optionString(context.options, 'project-id') ?? await projectIdentity(projectPath);
-    const report = await new AgentAcceptanceService(registry).verify({ agentId: selected, brainPath: context.brainPath, projectId, confirmed: true });
+    const project = await resolveCliProject(context);
+    const report = await new AgentAcceptanceService(registry).verify({ agentId: selected, brainPath: context.brainPath, projectId: project.id, confirmed: true });
     return { ok: true, code: 'AGENT_E2E_VERIFIED', message: 'real-agent Evidence, review, and recall path verified', data: report };
   }
-  throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', 'supported agent commands: status, targets, ingest, verify');
+  throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', 'supported agent commands: status, targets, install, ingest, verify');
+}
+
+async function projectCommand(subcommand: string | undefined, context: CliContext): Promise<CliResponse> {
+  if (subcommand === undefined || subcommand === 'show' || subcommand === 'inspect') {
+    const project = await resolveCliProject(context);
+    return { ok: true, code: 'PROJECT_CONTEXT', message: 'runtime project context resolved', data: project };
+  }
+  if (subcommand === 'list') {
+    const database = new DatabaseStore(context.databasePath);
+    try {
+      return { ok: true, code: 'PROJECT_LIST', message: 'known projects loaded', data: database.listProjectContexts() };
+    } finally {
+      database.close();
+    }
+  }
+  throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', 'supported project commands: show, inspect, list');
 }
 
 function packCommand(subcommand: string | undefined, context: CliContext): CliResponse {
@@ -1530,7 +1583,7 @@ async function learnCommand(context: CliContext): Promise<CliResponse> {
     throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', `unsupported learn type: ${type}; expected one of ${LEARN_TYPES.join(', ')}`);
   }
   const include = optionString(context.options, 'include');
-  const project = optionString(context.options, 'project');
+  const project = optionString(context.options, 'project-id');
   const maxBlocks = numberOption(context.options, 'max-blocks');
   const intervalMs = numberOption(context.options, 'interval-ms');
   const maxCycles = numberOption(context.options, 'max-cycles');
@@ -1591,31 +1644,46 @@ function requestedAgentIds(value: string, registry: AgentAdapterRegistry): reado
   return [...new Set(normalized)];
 }
 
-function configuredAgentTargets(context: CliContext): readonly { readonly id: string; readonly targetPaths: readonly string[] }[] {
+async function configuredAgentTargets(context: CliContext, resolvedProject?: ProjectContext): Promise<readonly { readonly id: string; readonly targetPaths: readonly string[] }[]> {
+  const project = resolvedProject ?? await resolveCliProject(context);
   const registry = new AgentAdapterRegistry();
   return context.config.agents.enabled.map((configuredId) => {
     const id = configuredId === 'claude' ? 'claude-code' : configuredId;
-    const adapter = registry.get(id);
     return {
       id,
-      targetPaths: adapter?.staticTargets(context.config.paths.project)
-        ?? [join(context.config.paths.project, id === 'claude-code' ? 'CLAUDE.md' : 'AGENTS.md')],
+      targetPaths: agentTargetPaths(registry, id, project.root),
     };
   });
 }
 
-function stableProjectId(projectPath: string): string {
-  return `project-${contentHash(projectPath.replaceAll('\\', '/')).slice(-16)}`;
+function agentTargetPaths(registry: AgentAdapterRegistry, id: string, projectRoot: string): readonly string[] {
+  return registry.get(id)?.staticTargets(projectRoot)
+    ?? [join(projectRoot, id === 'claude-code' ? 'CLAUDE.md' : 'AGENTS.md')];
 }
 
-async function projectIdentity(projectPath: string): Promise<string> {
-  try {
-    const remote = (await promisify(execFile)('git', ['-C', projectPath, 'remote', 'get-url', 'origin'])).stdout.trim();
-    if (remote.length > 0) return `project-${contentHash(remote.toLowerCase().replace(/\.git$/u, '')).slice(-16)}`;
-  } catch {
-    return stableProjectId(projectPath);
-  }
-  return stableProjectId(projectPath);
+async function resolveCliProject(context: CliContext): Promise<ProjectContext> {
+  const legacyProject = optionString(context.options, 'project');
+  const legacyProjectId = legacyProject?.startsWith('project-') === true ? legacyProject : undefined;
+  const legacyProjectRoot = legacyProjectId === undefined ? legacyProject : undefined;
+  return resolveProjectContext({
+    cwd: context.cwd,
+    ...(optionString(context.options, 'project-root') === undefined && legacyProjectRoot === undefined ? {} : { projectRoot: optionString(context.options, 'project-root') ?? legacyProjectRoot as string }),
+    ...(optionString(context.options, 'project-id') === undefined && legacyProjectId === undefined ? {} : { projectId: optionString(context.options, 'project-id') ?? legacyProjectId as string }),
+    markerFile: context.config.projectResolution.markerFile,
+    preferGitRoot: context.config.projectResolution.preferGitRoot,
+    preferGitRemote: context.config.projectResolution.preferGitRemote,
+  });
+}
+
+function projectRecord(project: ProjectContext): Parameters<DatabaseStore['saveProjectContext']>[0] {
+  return {
+    id: project.id,
+    root: project.root,
+    name: project.name,
+    source: project.source,
+    canonicalKey: project.canonicalKey,
+    ...(project.gitRemote === undefined ? {} : { gitRemote: project.gitRemote }),
+  };
 }
 
 function memoryPath(brainPath: string, memory: Memory): string {
@@ -1679,7 +1747,7 @@ async function scanMarkdown(brainPath: string): Promise<{ records: readonly { me
 }
 
 async function markerHealth(context: CliContext): Promise<{ ok: boolean; status: string; detail?: string }> {
-  const targets = configuredAgentTargets(context).flatMap((agent) => agent.targetPaths);
+  const targets = (await configuredAgentTargets(context)).flatMap((agent) => agent.targetPaths);
   if (targets.length === 0) return { ok: true, status: 'not-configured' };
   const failures: string[] = [];
   for (const target of targets) {

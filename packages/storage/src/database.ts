@@ -114,6 +114,27 @@ export interface SessionObservation extends SessionObservationInput {
   readonly visibility: 'normal' | 'redacted' | 'excluded';
 }
 
+export interface StoredProjectContext {
+  readonly id: string;
+  readonly root: string;
+  readonly name: string;
+  readonly source: string;
+  readonly canonicalKey: string;
+  readonly gitRemote?: string;
+  readonly lastSeenAt: string;
+}
+
+export interface StoredSessionContext {
+  readonly sessionId: string;
+  readonly projectId: string;
+  readonly projectRoot: string;
+  readonly cwd: string;
+  readonly agentId: string;
+  readonly source: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
 export class DatabaseStore {
   private readonly database: SqliteDatabase;
   private readonly now: () => Date;
@@ -352,6 +373,57 @@ export class DatabaseStore {
   listObservations(): readonly Observation[] {
     return this.listMetadata('observation:')
       .map(({ value }) => parseObservation(JSON.parse(value) as unknown));
+  }
+
+  saveProjectContext(project: Omit<StoredProjectContext, 'lastSeenAt'>): void {
+    const timestamp = this.now().toISOString();
+    const payload = JSON.stringify({ ...project, lastSeenAt: timestamp });
+    this.database
+      .prepare(
+        `INSERT INTO projects (id, payload, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`,
+      )
+      .run(project.id, payload, timestamp);
+    this.database
+      .prepare(
+        `INSERT INTO project_roots (project_id, local_path, first_seen_at, last_seen_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(project_id, local_path) DO UPDATE SET last_seen_at = excluded.last_seen_at`,
+      )
+      .run(project.id, project.root, timestamp, timestamp);
+  }
+
+  listProjectContexts(): readonly StoredProjectContext[] {
+    return this.database
+      .prepare('SELECT payload FROM projects ORDER BY updated_at DESC, id')
+      .all()
+      .map((row) => JSON.parse((row as { payload: string }).payload) as StoredProjectContext);
+  }
+
+  saveSessionContext(input: Omit<StoredSessionContext, 'createdAt' | 'updatedAt'>): StoredSessionContext {
+    const timestamp = this.now().toISOString();
+    this.database
+      .prepare(
+        `INSERT INTO session_contexts
+          (session_id, project_id, project_root, cwd, agent_id, source, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET
+           project_id = excluded.project_id,
+           project_root = excluded.project_root,
+           cwd = excluded.cwd,
+           agent_id = excluded.agent_id,
+           source = excluded.source,
+           updated_at = excluded.updated_at`,
+      )
+      .run(input.sessionId, input.projectId, input.projectRoot, input.cwd, input.agentId, input.source, timestamp, timestamp);
+    return this.getSessionContext(input.sessionId) as StoredSessionContext;
+  }
+
+  getSessionContext(sessionId: string): StoredSessionContext | null {
+    const row = this.database
+      .prepare('SELECT * FROM session_contexts WHERE session_id = ?')
+      .get(sessionId) as SessionContextRow | undefined;
+    return row === undefined ? null : toStoredSessionContext(row);
   }
 
   saveSessionObservation(input: SessionObservationInput): boolean {
@@ -649,6 +721,17 @@ interface SessionObservationRow {
   created_at: string;
 }
 
+interface SessionContextRow {
+  session_id: string;
+  project_id: string;
+  project_root: string;
+  cwd: string;
+  agent_id: string;
+  source: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface MemoryIndexMatch {
   readonly entry: MemoryIndexEntry;
   readonly rank: number;
@@ -698,6 +781,19 @@ function toSessionObservation(row: SessionObservationRow): SessionObservation {
     contentHash: row.content_hash,
     visibility: row.visibility,
     createdAt: row.created_at,
+  };
+}
+
+function toStoredSessionContext(row: SessionContextRow): StoredSessionContext {
+  return {
+    sessionId: row.session_id,
+    projectId: row.project_id,
+    projectRoot: row.project_root,
+    cwd: row.cwd,
+    agentId: row.agent_id,
+    source: row.source,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 

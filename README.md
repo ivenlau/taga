@@ -67,12 +67,22 @@ node dist/apps/daemon/src/main.js
 ### 1. 初始化 Brain
 
 ```bash
-taga init --brain=./brain --project=. --agent=local
-taga doctor --brain=./brain --json
-taga reindex --brain=./brain
+taga init --brain="$HOME/.taga/brain" --agent=local --yes
+taga doctor --brain="$HOME/.taga/brain" --json
+taga reindex --brain="$HOME/.taga/brain"
 ```
 
-`init` 会创建标准配置和 Brain 目录。配置文件使用 block-style YAML，不把配置再编码成嵌套 JSON。
+`init` 会创建标准配置和 Brain 目录。Brain 可以同时服务多个项目，不会在配置中固定某个项目路径。配置文件使用 block-style YAML，不把配置再编码成嵌套 JSON。
+
+进入具体项目后，可以安装该项目的 Agent 指令：
+
+```bash
+cd /path/to/project
+taga agent install --agent=codex --yes
+taga project show --json
+```
+
+Taga 会根据 Agent 的当前工作目录向上寻找 Git 根目录，并优先使用规范化后的 `origin` 生成稳定项目身份；非 Git 目录使用规范化路径生成身份。
 
 ### 2. 记录和检索记忆
 
@@ -111,10 +121,12 @@ Taga 只维护 `taga:instructions:begin/end` 标记之间的内容，重复执�
 | `doctor` | 检查平台、存储、索引和运行状态 |
 | `config validate` | 校验当前有效配置 |
 | `config show` | 查看脱敏后的有效配置及每项来源 |
-| `config migrate --write` | 将旧版 `_config.yaml` 迁移为 schema v3 |
+| `config migrate --write` | 将旧版配置迁移为 schema v4 |
+| `project show` | 显示当前工作目录解析出的项目身份 |
+| `project list` | 列出 Brain 已发现的项目 |
 | `memory` | 列表、搜索、查看、编辑、反馈和生命周期管理 |
 | `context` | 构建、预览、解释和追踪 Context Pack |
-| `agent` | 检测 Agent、查看目标、采集会话和执行验收 |
+| `agent` | 检测 Agent、安装项目指令、采集会话和执行验收 |
 | `daemon` | 启动、停止、安装和管理后台 daemon |
 | `vector` | 查看、重建、同步和优化语义索引 |
 | `reindex` | 从 Markdown 重建派生索引 |
@@ -142,7 +154,7 @@ Taga 只维护 `taga:instructions:begin/end` 标记之间的内容，重复执�
 
 1. 命令行覆写，例如 `--brain`、初始化参数等。
 2. 环境变量，例如 `TAGA_BRAIN`、`TAGA_SEMANTIC_MODE`。
-3. `config.yaml` 中的 schema v3 配置。
+3. `config.yaml` 中的 schema v4 配置。
 4. 内置默认值。
 
 `taga config show --json` 会同时输出脱敏后的有效配置和每个字段的来源，适合排查“配置写了但没有生效”的问题。LLM API Key 不写入 YAML，只从 `TAGA_LLM_API_KEY` 读取。
@@ -150,16 +162,22 @@ Taga 只维护 `taga:instructions:begin/end` 标记之间的内容，重复执�
 ### 标准 YAML 示例
 
 ```yaml
-schemaVersion: 3
+schemaVersion: 4
 
 paths:
   brain: ./brain
-  project: .
 
 agents:
   enabled:
     - codex
   writeInstructions: true
+
+projectResolution:
+  mode: auto
+  preferGitRoot: true
+  preferGitRemote: true
+  markerFile: .taga/project.yaml
+  unknownProjectPolicy: global-only
 
 retrieval:
   semantic:
@@ -201,7 +219,7 @@ taga config validate
 taga config show --json
 ```
 
-旧版 schema v1/v2 配置会以只读兼容方式加载。确认迁移结果后执行：
+旧版 schema v1/v2/v3 配置会以只读兼容方式加载。V3 中的 `paths.project` 只用于迁移识别，不再作为运行时默认项目。确认迁移结果后执行：
 
 ```bash
 taga config migrate
@@ -218,7 +236,7 @@ taga config migrate --write
 | --- | --- |
 | `TAGA_CONFIG` | 指定 YAML 配置文件 |
 | `TAGA_BRAIN` | 覆盖 Brain 路径 |
-| `TAGA_PROJECT` | 覆盖项目路径 |
+| `TAGA_PROJECT_MARKER_FILE` | 覆盖 monorepo 项目边界标记路径 |
 | `TAGA_SEMANTIC_MODE` | `off`、`shadow` 或 `on` |
 | `TAGA_BGE_M3_MODEL_PATH` | 本地 BGE-M3 模型目录 |
 | `TAGA_LLM_MODE` | `off`、`shadow` 或 `on` |
@@ -273,6 +291,19 @@ taga-mcp
 - `knowledge_ingest`
 
 Agent 宿主需要在自己的 MCP 配置中把启动命令指向 `taga-mcp`；路径和模型等运行参数通过 Taga 的 `config.yaml` 或环境变量管理，不在工具请求中重复传递。
+
+Agent 开始会话时应传入实际工作目录：
+
+```json
+{
+  "session_id": "20261116-taga",
+  "agent_id": "codex",
+  "cwd": "D:\\projects\\taga",
+  "task": "fix configuration loading"
+}
+```
+
+`memory_session_start` 会返回 `project_id`、`project_root` 和识别来源，并将项目绑定到该 session。后续 `memory_search`、`memory_record`、`memory_feedback`、`memory_precheck` 和 `context_trace` 可以只传 `session_id`。无项目上下文时只允许召回 global/domain 记忆，不会召回任意项目记忆。
 
 ## Daemon
 
@@ -337,7 +368,8 @@ TAGA_BGE_M3_MODEL_PATH=/path/to/Xenova/bge-m3 pnpm run evaluate:semantic:strict
 apps/cli                CLI 入口
 apps/mcp                JSON Lines MCP server
 apps/daemon             会话采集、语义索引和后台整合
-packages/config         schema v3、配置分层和迁移
+packages/config         schema v4、配置分层和迁移
+packages/project-context 动态项目识别和稳定身份
 packages/domain         Memory 领域模型与契约
 packages/storage        Markdown、SQLite、迁移和审计
 packages/retrieval      FTS5、RRF 和语义检索融合
@@ -372,7 +404,7 @@ pnpm run release:verify
 - Context Pack、session timeline 和 Agent 适配器
 - CLI、MCP server、daemon 和跨平台服务模板
 - 可选 BGE-M3/Zvec 语义检索、LLM shadow/on 和自动整合
-- 配置 schema v3、分层优先级、旧版配置迁移和发布验证
+- 配置 schema v4、动态多项目上下文、分层优先级、旧版配置迁移和发布验证
 
 当前限制：
 

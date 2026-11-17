@@ -21,8 +21,22 @@ describe('taga CLI', () => {
 
     const applied = streams();
     expect(await runCli(['init', '--yes', '--json', `--brain=${join(fixture.path, 'brain')}`], { cwd: fixture.path, streams: applied })).toBe(0);
-    expect(await readFile(join(fixture.path, 'brain', 'config.yaml'), 'utf8')).toContain('schemaVersion: 3');
+    const config = await readFile(join(fixture.path, 'brain', 'config.yaml'), 'utf8');
+    expect(config).toContain('schemaVersion: 4');
+    expect(config).not.toContain('  project:');
     expect(await runCli(['init', '--yes', '--json', `--brain=${join(fixture.path, 'brain')}`], { cwd: fixture.path, streams: streams() })).toBe(0);
+    await fixture.cleanup();
+  });
+
+  it('resolves the current project and installs project-local agent instructions', async () => {
+    const fixture = await createTemporaryDirectory();
+    const brain = join(fixture.path, 'brain');
+    expect(await runCli(['init', '--yes', '--no-instructions', '--agent=local', `--brain=${brain}`], { cwd: fixture.path, streams: streams() })).toBe(0);
+    const shown = streams();
+    expect(await runCli(['project', 'show', '--json', `--brain=${brain}`], { cwd: fixture.path, streams: shown })).toBe(0);
+    expect((JSON.parse(shown.stdout.value) as { data: { root: string; id: string } }).data).toMatchObject({ root: fixture.path });
+    expect(await runCli(['agent', 'install', '--agent=local', '--yes', `--brain=${brain}`], { cwd: fixture.path, streams: streams() })).toBe(0);
+    expect(await readFile(join(fixture.path, 'AGENTS.md'), 'utf8')).toContain('memory_session_start');
     await fixture.cleanup();
   });
 
