@@ -17,7 +17,7 @@ import {
   markerEnd,
   parseMarkdownDocument,
 } from '../../../packages/storage/src/index.js';
-import { ContextPackBuilder } from '../../../packages/context/src/index.js';
+import { ContextPackBuilder, summarizePack } from '../../../packages/context/src/index.js';
 import { BrainBrowser } from '../../../packages/browsing/src/index.js';
 import {
   FtsRetrievalProvider,
@@ -30,7 +30,8 @@ import { enqueueSemanticUpsert, ZvecMemoryIndex, ZvecSemanticRetriever } from '.
 import { parseMemory, type Memory } from '../../../packages/domain/src/index.js';
 import { NotificationService } from '../../../packages/notifications/src/index.js';
 import { MemoryPrecheckService } from '../../../packages/precheck/src/index.js';
-import { SessionContextService, observationContentHash } from '../../../packages/session/src/index.js';
+import { selectContextCandidates, SessionContextService, observationContentHash } from '../../../packages/session/src/index.js';
+import { DomainPackService } from '../../../packages/domain-packs/src/index.js';
 import { AgentAdapterRegistry } from '../../../packages/adapters/src/index.js';
 import { createDefaultConfig, type ResolvedConfig } from '../../../packages/config/src/index.js';
 import { resolveProjectContext, type ProjectContext } from '../../../packages/project-context/src/index.js';
@@ -553,6 +554,15 @@ export class LiteMcpServer {
     });
   }
 
+  private trySemanticRetriever(database: DatabaseStore): SemanticRetriever | undefined {
+    if (this.config.retrieval.semantic.mode === 'off') return undefined;
+    try {
+      return this.semanticRetriever(database);
+    } catch {
+      return undefined;
+    }
+  }
+
   private async timeline(input: Record<string, unknown>): Promise<unknown> {
     const parsed = timelineInputSchema.parse(input);
     const database = new DatabaseStore(join(this.brainPath, 'taga.db'));
@@ -645,7 +655,9 @@ export class LiteMcpServer {
         ...(parsed.task === undefined ? {} : { task: parsed.task }),
         ...(parsed.token_budget === undefined ? {} : { tokenBudget: parsed.token_budget }),
         refresh: parsed.refresh,
-      }, await this.readMemoryFiles());
+        channel: parsed.inject ? 'static' : 'mcp',
+        domainContributions: new DomainPackService(database).contextContributions(),
+      }, await this.readMemoryFiles(), this.trySemanticRetriever(database));
       let injectedPath: string | undefined;
       if (parsed.inject && parsed.target_path !== undefined) {
         await new ContextPackBuilder().inject(parsed.target_path, result.pack);
@@ -665,6 +677,7 @@ export class LiteMcpServer {
           source: result.source,
           stale: result.stale,
           packId: result.pack.id,
+          stats: summarizePack(result.pack),
         },
       });
       return {
@@ -787,12 +800,17 @@ export class LiteMcpServer {
     const database = new DatabaseStore(join(this.brainPath, 'taga.db'));
     try {
       const projectId = resolveBoundProjectId(database, parsed.session_id, parsed.project_id);
+      const selection = await selectContextCandidates(database, {
+        ...(parsed.task === undefined ? {} : { task: parsed.task }),
+        ...(projectId === undefined ? {} : { projectId }),
+      }, records, this.trySemanticRetriever(database));
       const pack = new ContextPackBuilder().build({
         agentId: parsed.agent_id,
         ...(projectId === undefined ? {} : { projectId }),
         ...(parsed.task === undefined ? {} : { task: parsed.task }),
         channel: 'mcp',
-        candidates: records.map(({ memory, body }) => ({ memory, body })),
+        candidates: selection.candidates,
+        domainContributions: new DomainPackService(database).contextContributions(),
       });
       return { ok: true, data: new ContextPackBuilder().trace(pack), degraded: false, warnings: [], next_actions: [] };
     } finally {

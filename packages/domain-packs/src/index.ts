@@ -49,6 +49,8 @@ export interface DomainPackRecordResult {
   readonly diagnostics: readonly string[];
 }
 
+const DOMAIN_ADVISORY_LIMIT = 5;
+
 const definitions: readonly DomainPackDefinition[] = [
   {
     id: 'writing',
@@ -199,8 +201,16 @@ export class DomainPackService {
   contextContribution(packId: DomainPackId): { readonly title: string; readonly content: string; readonly candidateIds: readonly string[] } | null {
     const pack = this.require(packId);
     if (!this.isEnabled(pack.id)) return null;
-    const candidates = this.database.listCandidates().filter((candidate) => candidate.packId === pack.id && candidate.decision === 'pending' && candidate.applicability?.status !== 'unavailable');
+    const candidates = this.database.listCandidates()
+      .filter((candidate) => candidate.packId === pack.id && candidate.decision === 'pending' && candidate.applicability?.status !== 'unavailable')
+      .slice(0, DOMAIN_ADVISORY_LIMIT);
     return { title: pack.contextSection, content: candidates.map((candidate) => `- ${candidate.summary}`).join('\n'), candidateIds: candidates.map((candidate) => candidate.id) };
+  }
+
+  contextContributions(): { readonly title: string; readonly content: string; readonly candidateIds: readonly string[] }[] {
+    return this.registry.all()
+      .map((pack) => this.contextContribution(pack.id))
+      .filter((contribution) => contribution !== null);
   }
 
   private require(packId: string): DomainPackDefinition {

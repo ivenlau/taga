@@ -1,2 +1,2 @@
-export { ContextPackBuilder } from './context.js';
-export type { ContextBuildRequest, ContextCandidate, ContextTrace } from './context.js';
+export { ContextPackBuilder, summarizePack } from './context.js';
+export type { ContextBuildRequest, ContextCandidate, ContextTrace, DomainContextContribution, PackStats } from './context.js';

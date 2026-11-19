@@ -21,7 +21,7 @@ import {
   type LoadedConfig,
   type ResolvedConfig,
 } from '../../../packages/config/src/index.js';
-import { ContextPackBuilder } from '../../../packages/context/src/index.js';
+import { ContextPackBuilder, summarizePack } from '../../../packages/context/src/index.js';
 import { BrainBrowser } from '../../../packages/browsing/src/index.js';
 import { DevelopmentEvidenceService } from '../../../packages/development/src/index.js';
 import { DatabaseCandidateRepository, ReviewService } from '../../../packages/distillation/src/index.js';
@@ -84,7 +84,7 @@ import {
   parseMarkdownDocument,
   upsertManagedBlock,
 } from '../../../packages/storage/src/index.js';
-import { SessionContextService } from '../../../packages/session/src/index.js';
+import { selectContextCandidates, SessionContextService } from '../../../packages/session/src/index.js';
 import { resolveProjectContext, type ProjectContext } from '../../../packages/project-context/src/index.js';
 import { runInitWizard, type InitWizardUi } from './init-wizard.js';
 
@@ -1077,7 +1077,16 @@ function createCliSemanticRetriever(context: CliContext, database: DatabaseStore
   });
 }
 
-async function contextCommand(subcommand: string | undefined, context: CliContext): Promise<CliResponse> {
+function safeCliSemanticRetriever(context: CliContext, database: DatabaseStore): ZvecSemanticRetriever | undefined {
+  if (context.config.retrieval.semantic.mode === 'off') return undefined;
+  try {
+    return createCliSemanticRetriever(context, database);
+  } catch {
+    return undefined;
+  }
+}
+
+async function contextCommand(subcommand: string | undefined, context: CliContext, channel: 'preview' | 'static' = 'preview'): Promise<CliResponse> {
   if (!['start', 'preview', 'explain', 'trace'].includes(subcommand ?? '')) {
     throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', 'supported context commands: start, preview, explain, trace');
   }
@@ -1098,7 +1107,9 @@ async function contextCommand(subcommand: string | undefined, context: CliContex
         ...(optionString(context.options, 'task') === undefined ? {} : { task: optionString(context.options, 'task') as string }),
         cwd: context.cwd,
         refresh: context.options.get('refresh') === true,
-      }, records);
+        channel: context.options.get('inject') === true ? 'static' : 'mcp',
+        domainContributions: new DomainPackService(database).contextContributions(),
+      }, records, safeCliSemanticRetriever(context, database));
       let injectedPath: string | undefined;
       if (context.options.get('inject') === true) {
         const selectedAgent = optionString(context.options, 'agent') ?? 'local';
@@ -1114,7 +1125,7 @@ async function contextCommand(subcommand: string | undefined, context: CliContex
         subjectId: sessionId,
         occurredAt: new Date().toISOString(),
         reason: 'context start from CLI',
-        payload: { packId: result.pack.id, source: result.source, stale: result.stale },
+        payload: { packId: result.pack.id, source: result.source, stale: result.stale, stats: summarizePack(result.pack) },
       });
       return { ok: true, code: 'CONTEXT_SESSION_STARTED', message: 'session context loaded', data: { ...result, ...(injectedPath === undefined ? {} : { injectedPath }) } };
     } finally {
@@ -1123,16 +1134,21 @@ async function contextCommand(subcommand: string | undefined, context: CliContex
   }
   const projectId = project.id;
   const builder = new ContextPackBuilder();
-  const pack = builder.build({
-    agentId: optionString(context.options, 'agent') ?? 'local',
-    ...(projectId === undefined ? {} : { projectId }),
-    task: optionString(context.options, 'task'),
-    channel: 'preview',
-    candidates: records.map(({ memory, body }) => ({ memory, body })),
-  });
-  if (subcommand === 'preview') {
-    const database = new DatabaseStore(context.databasePath);
-    try {
+  const database = new DatabaseStore(context.databasePath);
+  try {
+    const selection = await selectContextCandidates(database, {
+      ...(optionString(context.options, 'task') === undefined ? {} : { task: optionString(context.options, 'task') as string }),
+      ...(projectId === undefined ? {} : { projectId }),
+    }, records, safeCliSemanticRetriever(context, database));
+    const pack = builder.build({
+      agentId: optionString(context.options, 'agent') ?? 'local',
+      ...(projectId === undefined ? {} : { projectId }),
+      task: optionString(context.options, 'task'),
+      channel,
+      candidates: selection.candidates,
+      domainContributions: new DomainPackService(database).contextContributions(),
+    });
+    if (subcommand === 'preview') {
       await new SqliteAuditLog(database).append({
         eventType: 'context.pack_built',
         actor: 'user',
@@ -1140,14 +1156,14 @@ async function contextCommand(subcommand: string | undefined, context: CliContex
         subjectId: pack.id,
         occurredAt: new Date().toISOString(),
         reason: 'context preview from CLI',
-        payload: { projectId, task: optionString(context.options, 'task') },
+        payload: { projectId, task: optionString(context.options, 'task'), stats: summarizePack(pack) },
       });
-    } finally {
-      database.close();
+      return { ok: true, code: 'CONTEXT_PREVIEW', message: 'context preview built', data: pack };
     }
-    return { ok: true, code: 'CONTEXT_PREVIEW', message: 'context preview built', data: pack };
+    return { ok: true, code: subcommand === 'explain' ? 'CONTEXT_EXPLAIN' : 'CONTEXT_TRACE', message: 'context decisions loaded', data: subcommand === 'explain' ? builder.explain(pack) : builder.trace(pack) };
+  } finally {
+    database.close();
   }
-  return { ok: true, code: subcommand === 'explain' ? 'CONTEXT_EXPLAIN' : 'CONTEXT_TRACE', message: 'context decisions loaded', data: subcommand === 'explain' ? builder.explain(pack) : builder.trace(pack) };
 }
 
 async function precheckCommand(context: CliContext): Promise<CliResponse> {
@@ -1208,7 +1224,7 @@ async function injectCommand(subcommand: string | undefined, context: CliContext
     }
     return { ok: true, code: 'INJECTION_DISABLED', message: 'context injection disabled', data: { path: targetPath } };
   }
-  const packResponse = await contextCommand('preview', context);
+  const packResponse = await contextCommand('preview', context, 'static');
   const data = packResponse.data;
   if (!isContextPack(data)) {
     throw new CliFailure(exitCodes.internal, 'INTERNAL_ERROR', 'context pack could not be built');

@@ -274,7 +274,7 @@ export const contextBuildInputSchema = z.object({
 export type ContextBuildInput = z.infer<typeof contextBuildInputSchema>;
 
 export const contextSectionSchema = z.object({
-  kind: z.enum(['header', 'habits', 'environment', 'project', 'lessons']),
+  kind: z.enum(['header', 'habits', 'environment', 'project', 'lessons', 'domain']),
   title: z.string().min(1),
   content: z.string(),
   tokenEstimate: z.number().int().nonnegative(),
