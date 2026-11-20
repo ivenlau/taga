@@ -14,3 +14,4 @@ coverage/
 pnpm-debug.log*
 # <<< minispec <<<
 npm-package/
+.codegraph/
