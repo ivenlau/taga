@@ -28,9 +28,9 @@ export const DEFAULT_AGENT_INSTRUCTIONS = [
   '   - `projects` — 项目决策与目标（方案取舍、里程碑、范围界定）',
   '   拿不准时选 `lessons`（最常见）；明显关于用户本人的选 `preferences`。',
   '   参数要求：传入当前 `session_id`，`scope` 通常使用 `"auto"`，`requested_status` 必须显式传 `"draft"`，`actor` 传 `"agent"`，`sources` 至少给出一条来源（file/commit/tool_call）；经验涉及具体文件、符号或提交时，`anchors` 传入对应锚点（`memory_precheck` 依赖锚点召回）。',
-  '   记录前先 `memory_search` 确认没有相近记忆：已存在则改用 `memory_feedback`（kind=conflict）或提示用户审核，不要重复写入。宁缺毋滥——只记可复用的事实，不记一次性细节和中间过程。',
+  '   记录前先 `memory_search` 确认没有相近记忆：已存在则改用 `memory_feedback`（kind=conflict）或提示用户审核，不要重复写入。宁缺毋滥——只记可复用的事实；不记一次性细节、中间过程、猜测和通用建议，机密信息一律不进记忆。',
   '   用户口述大段经验或外部知识时，改用 `knowledge_ingest` 入队蒸馏，不要整段塞进 `memory_record`。',
-  '3. **动手前查询**：遇到"以前怎么解决的"类问题，先 `memory_search` 再动手，避免重复踩坑；要修改某个文件或符号之前，先 `memory_precheck` 传入目标 `file` / `symbol`，检查是否存在相关记忆或流程约束。',
+  '3. **动手前查询**：遇到"以前怎么解决的"类问题，先 `memory_search` 再动手，避免重复踩坑；检索词可能有中英或用词差异时，传 `alternates` 同义变体（最多 6 个）扩大召回；准备告诉用户"之前没做过 / 没有记录"之前，先 `memory_search` 确认，不要凭印象下结论；要修改某个文件或符号之前，先 `memory_precheck` 传入目标 `file` / `symbol`，检查是否存在相关记忆或流程约束。',
   '4. **反馈闭环**：Context Pack 中的每条记忆都带 `[memory_id: ...]` 标记，反馈时直接引用该 ID。召回的记忆确实帮到了你，可在会话收尾时对关键记忆调 `memory_feedback`（kind=useful）；发现记忆过时或有误，调 kind=conflict 或 not_useful；确认环境/配置类记忆仍然有效，可调 kind=verified。',
   '5. **状态说明**：写入的记忆是 draft，用户可通过 `taga review` 审核，或由后台整合（consolidation）自动晋升后才进默认召回；不要向用户声称记忆"已生效"，可以说"已记录待审核"。工具返回 degraded 或 warnings 时（如 FTS 索引不可用），向用户说明并建议运行 `taga reindex`。',
 ].join('\n');

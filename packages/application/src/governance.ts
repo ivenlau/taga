@@ -88,6 +88,9 @@ export class GovernanceService {
   ): Promise<Memory> {
     const current = await this.requireMemory(id);
     const now = this.clock().toISOString();
+    const nextSources = changes.sources ?? current.sources;
+    const droppedSources = current.sources.filter((source) =>
+      !nextSources.some((candidate) => candidate.kind === source.kind && candidate.locator === source.locator));
     const next = parseMemory({
       ...current,
       ...changes,
@@ -100,8 +103,14 @@ export class GovernanceService {
     const superseded = transitionMemory(current, { type: 'supersede', replacementId: newId });
     await this.repository.save(superseded);
     await this.repository.save(next);
-    await this.record('memory.superseded', superseded, actor, reason, { replacementId: newId });
-    await this.record('memory.version_created', next, actor, reason, { supersedes: current.id });
+    await this.record('memory.superseded', superseded, actor, reason, {
+      replacementId: newId,
+      ...(droppedSources.length === 0 ? {} : { droppedSources }),
+    });
+    await this.record('memory.version_created', next, actor, reason, {
+      supersedes: current.id,
+      ...(droppedSources.length === 0 ? {} : { droppedSources }),
+    });
     return next;
   }
 

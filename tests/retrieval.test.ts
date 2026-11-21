@@ -63,6 +63,23 @@ describe('FTS retrieval', () => {
     await fixture.cleanup();
   });
 
+  it('fuses alternate wordings into lexical recall across languages', async () => {
+    const fixture = await createTemporaryDirectory();
+    const database = new DatabaseStore(`${fixture.path}/taga.db`);
+    const provider = new FtsRetrievalProvider(database);
+    provider.upsert(createMemory('deploy-en', { kind: 'global' }), 'deploy process runs through the release pipeline');
+    provider.upsert(createMemory('deploy-zh', { kind: 'global' }), '部署流程走发布流水线');
+
+    const results = provider.search({ query: '部署', alternates: ['deploy process', 'release pipeline'] });
+    expect(results.map((result) => result.memory.id)).toContain('deploy-zh');
+    expect(results.map((result) => result.memory.id)).toContain('deploy-en');
+    const englishHit = results.find((result) => result.memory.id === 'deploy-en');
+    expect(englishHit?.matchReason.some((reason) => reason.startsWith('match:alternate:'))).toBe(true);
+
+    database.close();
+    await fixture.cleanup();
+  });
+
   it('returns stable search, timeline, and why data with controlled FTS input', async () => {
     const fixture = await createTemporaryDirectory();
     const database = new DatabaseStore(`${fixture.path}/taga.db`);

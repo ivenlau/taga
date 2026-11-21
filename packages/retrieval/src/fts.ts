@@ -4,6 +4,7 @@ import type { DatabaseStore, MemoryIndexEntry } from '../../storage/src/index.js
 
 export interface SearchInput {
   readonly query: string;
+  readonly alternates?: readonly string[];
   readonly scope?: Scope;
   readonly limit?: number;
   readonly now?: string;
@@ -11,6 +12,8 @@ export interface SearchInput {
 }
 
 export const DRAFT_RECALL_PENALTY = 0.5;
+
+const MAX_QUERY_ALTERNATES = 6;
 
 export interface RecallCandidate {
   readonly memory: MemoryIndexEntry;
@@ -84,7 +87,7 @@ export interface ProgressiveDetail {
 }
 
 type MemoryTypeForIndex = MemoryIndexEntry['type'];
-type LexicalBranchName = 'phrase' | 'strict' | 'relaxed' | 'alias' | 'identifier' | 'trigram';
+type LexicalBranchName = 'phrase' | 'strict' | 'relaxed' | 'alias' | 'identifier' | 'trigram' | `alternate:${number}`;
 
 interface LexicalBranch {
   readonly name: LexicalBranchName;
@@ -157,6 +160,10 @@ export class FtsRetrievalProvider {
     if (plan.identifierQuery !== undefined) {
       branches.push(this.runBranch('identifier', plan.identifierQuery, 0.9, input, fetchLimit));
     }
+    (input.alternates ?? []).slice(0, MAX_QUERY_ALTERNATES).forEach((alternate, index) => {
+      const alternateQuery = buildTokenQuery(tokenizeQuery(alternate), 'OR');
+      if (alternateQuery !== '""') branches.push(this.runBranch(`alternate:${index}`, alternateQuery, 0.6, input, fetchLimit));
+    });
     let results = fuseLexicalBranches(branches, input, plan);
     if (results.length < limit && plan.trigramQuery !== undefined) {
       const trigramBranch = this.runBranch('trigram', plan.trigramQuery, 0.25, input, fetchLimit);

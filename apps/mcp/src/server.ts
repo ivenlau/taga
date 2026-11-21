@@ -38,6 +38,7 @@ import { resolveProjectContext, type ProjectContext } from '../../../packages/pr
 
 const searchInputSchema = z.object({
   query: z.string().min(1),
+  alternates: z.array(z.string().min(1).max(200)).max(6).optional(),
   session_id: z.string().min(1).optional(),
   project_id: z.string().min(1).optional(),
   type: z.array(z.enum(['preferences', 'environment', 'procedures', 'lessons', 'projects'])).optional(),
@@ -211,7 +212,7 @@ interface MemoryFile {
 }
 
 const tools: readonly McpTool[] = [
-  { name: 'memory_search', version: 'v1', description: 'Search active memory summaries with FTS5.' },
+  { name: 'memory_search', version: 'v1', description: 'Search active memory summaries with FTS5. Pass up to six alternate wordings (synonyms or translations) via alternates to widen lexical recall.' },
   { name: 'memory_timeline', version: 'v1', description: 'Read a memory timeline without sensitive raw evidence.' },
   { name: 'memory_session_start', version: 'v1', description: 'Build or load a bounded session-start context pack.' },
   { name: 'memory_session_observation', version: 'v1', description: 'Record a redacted session observation for later timeline recall.' },
@@ -458,6 +459,7 @@ export class LiteMcpServer {
       const mode = parsed.semantic_mode ?? this.config.retrieval.semantic.mode;
       const searchInput = {
         query: parsed.query,
+        ...(parsed.alternates === undefined ? {} : { alternates: parsed.alternates }),
         ...(projectId === undefined ? {} : { scope: { kind: 'project' as const, id: projectId } }),
         ...(parsed.include_draft === true ? { includeDraft: true } : {}),
         limit: parsed.k ?? 5,

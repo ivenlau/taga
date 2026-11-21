@@ -139,6 +139,9 @@ describe('init agent instructions', () => {
     expect(DEFAULT_AGENT_INSTRUCTIONS).toContain('knowledge_ingest');
     expect(DEFAULT_AGENT_INSTRUCTIONS).toContain('`task`');
     expect(DEFAULT_AGENT_INSTRUCTIONS).toContain('`anchors`');
+    expect(DEFAULT_AGENT_INSTRUCTIONS).toContain('alternates');
+    expect(DEFAULT_AGENT_INSTRUCTIONS).toContain('没有记录');
+    expect(DEFAULT_AGENT_INSTRUCTIONS).toContain('机密');
     expect(DEFAULT_AGENT_INSTRUCTIONS).toContain('taga review');
     expect(DEFAULT_AGENT_INSTRUCTIONS).toContain('"draft"');
     for (const memoryType of ['preferences', 'environment', 'procedures', 'lessons', 'projects']) {

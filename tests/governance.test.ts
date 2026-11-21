@@ -57,6 +57,29 @@ describe('memory governance', () => {
     expect(events[2]?.prevHash).toBe(events[1]?.eventHash);
   });
 
+  it('records dropped sources in audit when an edit shrinks the source list', async () => {
+    const repository = new InMemoryMemoryRepository();
+    const audit = new InMemoryAuditLog();
+    const service = new GovernanceService(repository, audit, () => new Date('2026-11-10T01:00:00.000Z'));
+    await service.create(activeMemory(), { actor: 'user' }, 'initial memory');
+
+    await service.edit('mem-1', 'mem-2', { sources: [{ kind: 'test', locator: 'replacement.test.ts' }] }, { actor: 'user' }, 'replace stale source');
+    const events = await audit.list();
+    const versionEvent = events.find((event) => event.eventType === 'memory.version_created');
+    expect(versionEvent?.payload).toMatchObject({
+      droppedSources: [{ kind: 'test', locator: 'governance.test.ts' }],
+    });
+    const supersededEvent = events.find((event) => event.eventType === 'memory.superseded');
+    expect(supersededEvent?.payload).toMatchObject({
+      droppedSources: [{ kind: 'test', locator: 'governance.test.ts' }],
+    });
+
+    await service.edit('mem-2', 'mem-3', { title: 'Bound retries v3' }, { actor: 'user' }, 'clarify wording');
+    const laterEvents = await audit.list();
+    const laterVersion = laterEvents.find((event) => event.eventType === 'memory.version_created' && event.subjectId === 'mem-3');
+    expect(laterVersion?.payload).not.toHaveProperty('droppedSources');
+  });
+
   it('requires confirmation for forget and excludes non-active memory by default', async () => {
     const repository = new InMemoryMemoryRepository();
     const audit = new InMemoryAuditLog();
