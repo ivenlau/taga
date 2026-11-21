@@ -12,9 +12,9 @@ const execFileAsync = promisify(execFile);
 export const DEFAULT_AGENT_INSTRUCTIONS = [
   '## Taga 长期记忆（taga-mcp）',
   '',
-  '本会话接入了 Taga 本地记忆库（MCP 服务器 `taga`，工具以 `memory_` / `brain_` / `context_` 开头）。行为约定：',
+  '本会话接入了 Taga 本地记忆库（MCP 服务器 `taga`，工具以 `memory_` / `brain_` / `context_` 开头）。**仅当本会话实际能调用这些工具时**才执行以下约定，否则忽略本节。行为约定：',
   '',
-  '1. **会话开始**：进入一个新任务会话时，调用 `memory_session_start`，传入当前工作目录 `cwd`（`session_id` 用 `日期-项目简称` 格式，如 `20261114-taga`）；Taga 会动态识别项目并返回 Context Pack。',
+  '1. **会话开始**：进入一个新任务会话时，调用 `memory_session_start`，传入当前工作目录 `cwd` 和当前任务描述 `task`（一句话概括用户这次要做什么；它是相关性召回的检索词，不传则退化为全量召回）（`session_id` 用 `日期-项目简称` 格式，如 `20261114-taga`）；Taga 会动态识别项目并返回 Context Pack。',
   '2. **主动记录**：当会话中产生或确认了**可跨会话复用**的经验时，主动调用 `memory_record` 写入。典型场景：',
   '   - 踩坑与修复方案（报错根因、有效解法）',
   '   - 用户的偏好与工作习惯（称呼、代码风格、流程偏好）',
@@ -27,10 +27,12 @@ export const DEFAULT_AGENT_INSTRUCTIONS = [
   '   - `lessons` — 踩坑与修复经验（报错根因、有效解法、"不要做 X"）',
   '   - `projects` — 项目决策与目标（方案取舍、里程碑、范围界定）',
   '   拿不准时选 `lessons`（最常见）；明显关于用户本人的选 `preferences`。',
-  '   参数要求：传入当前 `session_id`，`scope` 通常使用 `"auto"`，`requested_status` 必须显式传 `"draft"`，`actor` 传 `"agent"`，`sources` 至少给出一条来源（file/commit/tool_call）。宁缺毋滥——只记可复用的事实，不记一次性细节和中间过程。',
-  '3. **动手前查询**：遇到"以前怎么解决的"类问题、或要修改之前改过的文件时，先 `memory_search` 再动手，避免重复踩坑。',
-  '4. **反馈闭环**：召回的记忆确实帮到了你，可在会话收尾时对关键记忆调 `memory_feedback`（kind=useful）；发现记忆过时或有误，调 kind=conflict 或 not_useful。',
-  '5. **状态说明**：写入的记忆是 draft，由用户审核或后台整合（consolidation）自动晋升后才进默认召回。不要向用户声称记忆"已生效"，可以说"已记录待审核"。',
+  '   参数要求：传入当前 `session_id`，`scope` 通常使用 `"auto"`，`requested_status` 必须显式传 `"draft"`，`actor` 传 `"agent"`，`sources` 至少给出一条来源（file/commit/tool_call）；经验涉及具体文件、符号或提交时，`anchors` 传入对应锚点（`memory_precheck` 依赖锚点召回）。',
+  '   记录前先 `memory_search` 确认没有相近记忆：已存在则改用 `memory_feedback`（kind=conflict）或提示用户审核，不要重复写入。宁缺毋滥——只记可复用的事实，不记一次性细节和中间过程。',
+  '   用户口述大段经验或外部知识时，改用 `knowledge_ingest` 入队蒸馏，不要整段塞进 `memory_record`。',
+  '3. **动手前查询**：遇到"以前怎么解决的"类问题，先 `memory_search` 再动手，避免重复踩坑；要修改某个文件或符号之前，先 `memory_precheck` 传入目标 `file` / `symbol`，检查是否存在相关记忆或流程约束。',
+  '4. **反馈闭环**：Context Pack 中的每条记忆都带 `[memory_id: ...]` 标记，反馈时直接引用该 ID。召回的记忆确实帮到了你，可在会话收尾时对关键记忆调 `memory_feedback`（kind=useful）；发现记忆过时或有误，调 kind=conflict 或 not_useful；确认环境/配置类记忆仍然有效，可调 kind=verified。',
+  '5. **状态说明**：写入的记忆是 draft，用户可通过 `taga review` 审核，或由后台整合（consolidation）自动晋升后才进默认召回；不要向用户声称记忆"已生效"，可以说"已记录待审核"。工具返回 degraded 或 warnings 时（如 FTS 索引不可用），向用户说明并建议运行 `taga reindex`。',
 ].join('\n');
 
 export interface SourceCursor {

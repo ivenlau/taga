@@ -471,6 +471,10 @@ async function doctorCommand(context: CliContext): Promise<CliResponse> {
   checks.orphan_markdown = scanned.orphans.length === 0
     ? { ok: true, status: 'clean' }
     : { ok: false, status: 'orphaned', detail: JSON.stringify(scanned.orphans) };
+  const pendingReview = scanned.records.filter(({ memory }) => memory.status === 'draft' || memory.status === 'candidate');
+  checks.review_backlog = pendingReview.length === 0
+    ? { ok: true, status: 'clean' }
+    : { ok: true, status: 'pending-review', detail: JSON.stringify({ count: pendingReview.length, ids: pendingReview.map(({ memory }) => memory.id), review: 'taga review' }) };
   let database: DatabaseStore | undefined;
   try {
     await ensurePrivateDirectory(context.brainPath);

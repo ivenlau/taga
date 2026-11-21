@@ -134,6 +134,12 @@ describe('init agent instructions', () => {
   it('exposes the default instructions with the expected tool guidance', () => {
     expect(DEFAULT_AGENT_INSTRUCTIONS).toContain('memory_record');
     expect(DEFAULT_AGENT_INSTRUCTIONS).toContain('memory_search');
+    expect(DEFAULT_AGENT_INSTRUCTIONS).toContain('memory_precheck');
+    expect(DEFAULT_AGENT_INSTRUCTIONS).toContain('memory_feedback');
+    expect(DEFAULT_AGENT_INSTRUCTIONS).toContain('knowledge_ingest');
+    expect(DEFAULT_AGENT_INSTRUCTIONS).toContain('`task`');
+    expect(DEFAULT_AGENT_INSTRUCTIONS).toContain('`anchors`');
+    expect(DEFAULT_AGENT_INSTRUCTIONS).toContain('taga review');
     expect(DEFAULT_AGENT_INSTRUCTIONS).toContain('"draft"');
     for (const memoryType of ['preferences', 'environment', 'procedures', 'lessons', 'projects']) {
       expect(DEFAULT_AGENT_INSTRUCTIONS).toContain(`\`${memoryType}\` —`);

@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runCli } from '../apps/cli/src/index.js';
+import { contentHash, writeMarkdownDocument } from '../packages/storage/src/index.js';
 import { createTemporaryDirectory } from '../packages/testkit/src/index.js';
+import type { Memory } from '../packages/domain/src/index.js';
 
 function streams(): { stdout: { value: string; write(chunk: string): void }; stderr: { value: string; write(chunk: string): void } } {
   const stdout = { value: '', write(chunk: string): void { stdout.value += chunk; } };
@@ -92,6 +94,53 @@ describe('taga CLI', () => {
       packageVersion: '0.8.0',
       accessMode: 'read-only',
     });
+    await fixture.cleanup();
+  });
+
+  it('reports pending draft backlog as review guidance in doctor', async () => {
+    const fixture = await createTemporaryDirectory();
+    const brain = join(fixture.path, 'brain');
+    await runCli(['init', '--yes', `--brain=${brain}`], { cwd: fixture.path, streams: streams() });
+    const timestamp = '2026-11-20T00:00:00.000Z';
+    const draft: Memory = {
+      schemaVersion: 1,
+      id: 'mem-doctor-draft',
+      type: 'lessons',
+      scope: { kind: 'global' },
+      projectId: null,
+      status: 'draft',
+      title: 'Doctor backlog fixture',
+      summary: 'Draft waiting for review.',
+      confidence: 0.5,
+      sourceTrust: 'observed',
+      visibility: 'private',
+      created: timestamp,
+      updated: timestamp,
+      lastVerified: null,
+      lastRecalled: null,
+      reviewCount: 0,
+      usefulCount: 0,
+      notUsefulCount: 0,
+      expiresAt: null,
+      contentHash: contentHash('doctor backlog body'),
+      sources: [{ kind: 'test', locator: 'cli.test.ts' }],
+      anchors: [],
+      tags: [],
+      supersedes: null,
+    };
+    await writeMarkdownDocument(join(brain, 'lessons', 'global', 'mem-doctor-draft.md'), draft, 'doctor backlog body');
+    expect(await runCli(['reindex', '--apply', '--json', `--brain=${brain}`], { cwd: fixture.path, streams: streams() })).toBe(0);
+    const output = streams();
+    const code = await runCli(['doctor', '--json', `--brain=${brain}`], { cwd: fixture.path, streams: output });
+    const response = JSON.parse(output.stdout.value) as unknown as {
+      ok: boolean;
+      code: string;
+      data: { checks: Record<string, { ok: boolean; status: string; detail?: string }> };
+    };
+    expect(code).toBe(0);
+    expect(response.ok).toBe(true);
+    expect(response.data.checks.review_backlog?.status).toBe('pending-review');
+    expect(response.data.checks.review_backlog?.detail).toContain('mem-doctor-draft');
     await fixture.cleanup();
   });
 

@@ -45,7 +45,7 @@ describe('ContextPackBuilder', () => {
       agentId: 'claude',
       projectId: 'project-1',
       channel: 'static',
-      tokenBudget: 10,
+      tokenBudget: 20,
       candidates: [
         { memory: memory('global', { kind: 'global' }, 'Project'), body: 'global content' },
         { memory: memory('project', { kind: 'project', id: 'project-1' }, 'Project'), body: 'project content' },
@@ -126,7 +126,7 @@ describe('ContextPackBuilder', () => {
     const pack = new ContextPackBuilder().build({
       agentId: 'claude',
       channel: 'mcp',
-      tokenBudget: 20,
+      tokenBudget: 36,
       candidates: [
         { memory: memory('lesson-a', { kind: 'global' }, 'Aa', { summary: 'S' }), body: 'a'.repeat(24) },
         { memory: memory('lesson-b', { kind: 'global' }, 'Bb', { summary: 's'.repeat(24) }), body: 'b'.repeat(17) },
@@ -163,6 +163,19 @@ describe('ContextPackBuilder', () => {
     }, now);
     expect(pack.content).toContain('Task: fix the tests');
     expect(pack.content).toContain('Cwd: D:/work/app');
+  });
+
+  it('switches the pack hint to recording guidance when nothing matched', () => {
+    const empty = new ContextPackBuilder().build({ agentId: 'claude', channel: 'mcp', candidates: [] }, now);
+    expect(empty.content).toContain('memory_record');
+    expect(empty.content).not.toContain('memory_precheck');
+
+    const populated = new ContextPackBuilder().build({
+      agentId: 'claude',
+      channel: 'mcp',
+      candidates: [{ memory: memory('one', { kind: 'global' }, 'Tt'), body: 'body' }],
+    }, now);
+    expect(populated.content).toContain('memory_feedback');
   });
 
   it('admits domain advisory sections only outside the static channel', () => {

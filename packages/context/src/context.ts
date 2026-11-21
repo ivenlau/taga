@@ -62,6 +62,12 @@ const BUCKET_SHARE_LIMIT = 0.6;
 const FRESHNESS_WINDOW_DAYS = 90;
 const cjkPattern = /[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff01-\uff60\uac00-\ud7af]/gu;
 
+const NEXT_QUERY_HINT =
+  'Use memory_search for more knowledge, run memory_precheck before editing a file or symbol, and use memory_feedback with the memory_id shown above when a recalled memory helped (useful) or is wrong (conflict / not_useful).';
+
+const EMPTY_PACK_HINT =
+  'No relevant memories matched this task yet. When this session surfaces a reusable lesson, preference, environment fact, or decision, record it with memory_record (requested_status "draft") so future sessions can recall it.';
+
 export class ContextPackBuilder {
   build(input: ContextBuildRequest, now: Date = new Date()): ContextPack {
     const policy = input.policy ?? defaultPolicy;
@@ -115,9 +121,10 @@ export class ContextPackBuilder {
       if (enforceCap && bucketBlocked.has(bucket)) {
         return true;
       }
-      const content = `${memory.title}\n${memory.summary}\n${candidate.body}`;
+      const idLine = `[memory_id: ${memory.id}]`;
+      const content = `${idLine}\n${memory.title}\n${memory.summary}\n${candidate.body}`;
       const fullTokens = estimateTokens(content);
-      const summaryContent = `${memory.title}\n${memory.summary}`;
+      const summaryContent = `${idLine}\n${memory.title}\n${memory.summary}`;
       const summaryTokens = estimateTokens(summaryContent);
       const capRoom = enforceCap ? bucketCap - (bucketUsed.get(bucket) ?? 0) : Number.POSITIVE_INFINITY;
       const include = (packed: string, used: number, fullBody: boolean): void => {
@@ -180,7 +187,8 @@ export class ContextPackBuilder {
     }
 
     const sections = [...sectionsByKind.values(), ...domainSections];
-    const nextQueryHint = 'Use memory_search for more knowledge and memory_precheck before editing a file or symbol.';
+    const includedCount = decisions.filter((decision) => decision.decision === 'included').length;
+    const nextQueryHint = includedCount === 0 ? EMPTY_PACK_HINT : NEXT_QUERY_HINT;
     const content = renderContent(input, sections, nextQueryHint);
     return {
       id: `pack-${input.agentId}-${input.projectId ?? 'global'}`,
@@ -205,7 +213,7 @@ export class ContextPackBuilder {
     return {
       packId: pack.id,
       decisions: pack.decisions,
-      nextQueryHint: 'Use memory_search for more knowledge and memory_precheck before editing a file or symbol.',
+      nextQueryHint: NEXT_QUERY_HINT,
     };
   }
 
