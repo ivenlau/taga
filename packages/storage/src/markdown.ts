@@ -171,12 +171,26 @@ export async function atomicWrite(path: string, content: string): Promise<void> 
     await handle.sync();
     await handle.close();
     handle = undefined;
-    await rename(temporaryPath, path);
+    await renameWithTransientRetry(temporaryPath, path);
   } finally {
     if (handle !== undefined) {
       await handle.close();
     }
     await rm(temporaryPath, { force: true });
+  }
+}
+
+async function renameWithTransientRetry(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      const transient = code === 'EPERM' || code === 'EACCES' || code === 'EBUSY';
+      if (attempt >= 4 || !transient) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+    }
   }
 }
 

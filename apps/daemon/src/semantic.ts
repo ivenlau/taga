@@ -4,19 +4,30 @@ import { enqueueSemanticRebuild, ZvecMemoryIndex, type MemoryChunkRecord } from 
 import { MarkdownMemoryRepository, type DatabaseStore, type JobRecord, type StoredMemory } from '../../../packages/storage/src/index.js';
 
 export function semanticJobHandlers(brainPath: string, database: DatabaseStore, modelPath = ''): ReadonlyMap<string, (job: JobRecord) => Promise<void>> {
-  return new Map([
+  const semanticRoot = join(brainPath, '.taga', 'semantic');
+  let sharedEmbedder: ReturnType<typeof createLocalBgeM3Embedder> | undefined;
+  let sharedIndex: ZvecMemoryIndex | undefined;
+  const getEmbedder = (): ReturnType<typeof createLocalBgeM3Embedder> => {
+    if (modelPath.length === 0) throw new Error('retrieval.semantic.modelPath is not configured');
+    sharedEmbedder ??= createLocalBgeM3Embedder({ modelPath, batchSize: 4 });
+    return sharedEmbedder;
+  };
+  const getIndex = (): ZvecMemoryIndex => {
+    sharedIndex ??= new ZvecMemoryIndex(semanticRoot);
+    return sharedIndex;
+  };
+  const handlers = new Map([
     ['semantic.upsert', async (job: JobRecord) => {
       const payload = JSON.parse(job.payload) as { memoryId?: unknown; contentHash?: unknown };
       if (typeof payload.memoryId !== 'string') throw new Error('semantic.upsert payload memoryId is invalid');
       const record = (await new MarkdownMemoryRepository(brainPath).records()).find(({ memory }) => memory.id === payload.memoryId);
-      const index = new ZvecMemoryIndex(join(brainPath, '.taga', 'semantic'));
+      const index = getIndex();
       if (record === undefined) {
         await index.removeMemory(payload.memoryId);
         return;
       }
       if (typeof payload.contentHash === 'string' && payload.contentHash !== record.memory.contentHash) return;
-      if (modelPath.length === 0) throw new Error('retrieval.semantic.modelPath is not configured');
-      const embedder = createLocalBgeM3Embedder({ modelPath, batchSize: 4 });
+      const embedder = getEmbedder();
       const chunks = chunkText(`${record.memory.title}\n\n${record.memory.summary}\n\n${record.body}`);
       const inputs: readonly EmbeddingInput[] = chunks.map((chunk) => ({ id: `${record.memory.id}:${chunk.index}`, text: chunk.text }));
       const vectors = await embedder.embed(inputs);
@@ -47,15 +58,14 @@ export function semanticJobHandlers(brainPath: string, database: DatabaseStore, 
     ['semantic.remove', async (job: JobRecord) => {
       const payload = JSON.parse(job.payload) as { memoryId?: unknown };
       if (typeof payload.memoryId !== 'string') throw new Error('semantic.remove payload memoryId is invalid');
-      const index = new ZvecMemoryIndex(join(brainPath, '.taga', 'semantic'));
+      const index = getIndex();
       const integrity = await index.integrity();
       if (integrity.activeGeneration !== null) await index.removeMemory(payload.memoryId);
     }],
     ['semantic.rebuild', async () => {
-      if (modelPath.length === 0) throw new Error('retrieval.semantic.modelPath is not configured');
-      const embedder = createLocalBgeM3Embedder({ modelPath, batchSize: 4 });
+      const embedder = getEmbedder();
       const repository = new MarkdownMemoryRepository(brainPath);
-      const index = new ZvecMemoryIndex(join(brainPath, '.taga', 'semantic'));
+      const index = getIndex();
       let records = await repository.records();
       for (let attempt = 0; attempt < 3; attempt += 1) {
         const chunks = await embedRecords(records, embedder);
@@ -76,11 +86,18 @@ export function semanticJobHandlers(brainPath: string, database: DatabaseStore, 
       throw new Error('Markdown changed continuously during semantic rebuild');
     }],
     ['semantic.optimize', async () => {
-      const index = new ZvecMemoryIndex(join(brainPath, '.taga', 'semantic'));
+      const index = getIndex();
       const integrity = await index.integrity();
       if (integrity.activeGeneration !== null) await index.optimize();
     }],
   ]);
+  return new Map([...handlers].map(([kind, handler]) => [kind, async (job: JobRecord) => {
+    try {
+      await handler(job);
+    } finally {
+      sharedIndex?.close();
+    }
+  }]));
 }
 
 async function embedRecords(records: readonly StoredMemory[], embedder: ReturnType<typeof createLocalBgeM3Embedder>): Promise<readonly MemoryChunkRecord[]> {

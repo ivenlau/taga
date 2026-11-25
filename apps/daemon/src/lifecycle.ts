@@ -163,7 +163,11 @@ export async function stopDaemon(brainPath: string, timeoutMs = 5000, processCon
 }
 
 export async function writeDaemonHealth(path: string, health: DaemonHealth): Promise<void> {
-  await atomicWrite(path, `${JSON.stringify(health)}\n`);
+  try {
+    await atomicWrite(path, `${JSON.stringify(health)}\n`);
+  } catch {
+    // health telemetry must never crash the daemon; Windows renames can transiently fail
+  }
 }
 
 export async function stopRequested(path: string): Promise<boolean> {

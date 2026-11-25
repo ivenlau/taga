@@ -205,8 +205,10 @@ async function nearestActive(
   let best: { memoryId: string; score: number } | undefined;
   for (const vector of vectors) {
     const hits = await index.query({ vector: vector.vector, topK: 5, status: 'active' });
-    const top = hits[0];
-    if (top !== undefined && (best === undefined || top.score > best.score)) best = { memoryId: top.memoryId, score: top.score };
+    for (const hit of hits) {
+      const similarity = 1 / (1 + Math.max(0, hit.score));
+      if (best === undefined || similarity > best.score) best = { memoryId: hit.memoryId, score: similarity };
+    }
   }
   return best;
 }
