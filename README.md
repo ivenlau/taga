@@ -345,6 +345,22 @@ taga daemon uninstall
 
 服务安装和卸载只管理 systemd/launchd 单元，不会删除 Brain 数据。详细说明见 [`packaging/systemd/README.md`](packaging/systemd/README.md) 和 [`packaging/launchd/README.md`](packaging/launchd/README.md)。
 
+## Web 工作台
+
+`apps/web` 提供本地 Web 工作台，作为 CLI / MCP / daemon 之外的第四个入口，复用同一套服务层与 Brain 数据。
+默认仅绑定 `127.0.0.1`（本地优先，无远程访问）：
+
+```bash
+node dist/apps/web/src/main.js --brain=./brain
+# 或 pnpm run web -- --brain=./brain
+```
+
+主要页面：概览、记忆库（浏览 / 详情 / 编辑 / 新建）、审核队列、记忆花园、搜索与召回调试、
+审计与时间线、项目与会话、知识包摄取队列、系统与设置。内置 8 套可切换主题（默认莫兰迪）。
+
+管理操作与 CLI / MCP 一致：写操作全部写入审计（actor=web）；遗忘、active 改写、reindex
+等高风险操作需要显式确认；未确认的 draft / candidate 不进入默认召回。
+
 ## 数据、安全与恢复
 
 - Markdown 是记忆事实源；SQLite、FTS5 和向量索引可以通过 `reindex` 重建。

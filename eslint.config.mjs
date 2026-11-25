@@ -15,6 +15,25 @@ export default tseslint.config(
       },
     },
   },
+  {
+    files: ['apps/web/public/**/*.js'],
+    languageOptions: {
+      globals: {
+        window: 'readonly',
+        document: 'readonly',
+        fetch: 'readonly',
+        localStorage: 'readonly',
+        setTimeout: 'readonly',
+        location: 'readonly',
+        URLSearchParams: 'readonly',
+        performance: 'readonly',
+        navigator: 'readonly',
+        Blob: 'readonly',
+        URL: 'readonly',
+        console: 'readonly',
+      },
+    },
+  },
   ...tseslint.configs.recommendedTypeChecked.map((config) => ({
     ...config,
     files: ['**/*.ts'],
