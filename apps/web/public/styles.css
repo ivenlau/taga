@@ -122,7 +122,7 @@ svg { display: block; }
 .card h2 { font-size: 15px; font-weight: 600; }
 .card-head { display: flex; align-items: center; gap: 10px; }
 .grid { display: grid; gap: 16px; }
-.grid.cols-2 { grid-template-columns: 1fr 1fr; }
+.grid.cols-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 .grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
 .grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
 .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -221,7 +221,7 @@ tbody tr:hover td { background: var(--accent-soft); cursor: pointer; }
 tbody tr.selected td { background: var(--accent-soft); }
 td.mono, th.mono { font-family: "JetBrains Mono", Consolas, monospace; font-size: 11px; }
 .pager {
-  display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+  display: flex; align-items: center; gap: 12px; padding: 12px 16px; flex: none;
   background: var(--accent-soft); border-top: 1px solid var(--border-soft);
 }
 .page-btn {
@@ -230,6 +230,28 @@ td.mono, th.mono { font-family: "JetBrains Mono", Consolas, monospace; font-size
   font-family: "JetBrains Mono", Consolas, monospace; font-size: 12px; color: var(--text-muted); cursor: pointer;
 }
 .page-btn.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+
+/* ---------- Fill-height list layout (fixed pager, scrolling list) ---------- */
+.fill-area { flex: 1 1 auto; min-height: 0; }
+.fill-area > * { min-height: 0; }
+.list-card { display: flex; flex-direction: column; min-height: 76px; }
+.list-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.list-scroll.stack { display: flex; flex-direction: column; gap: 16px; }
+.list-card > .pager, .list-card > .card { flex: none; }
+.page.fill .editor { flex: 1 1 auto; min-height: 0; }
+.page.fill .editor-area { flex: 1 1 auto; min-height: 0; }
+.list-scroll thead th { position: sticky; top: 0; z-index: 1; }
+.preview-body { max-height: 62vh; overflow-y: auto; font-size: 13px; color: var(--text-muted); line-height: 1.6; }
+.modal.preview-modal { width: 80vw; max-width: 80vw; height: 80vh; max-height: 80vh; padding: 26px 30px; }
+.preview-modal .preview-body { flex: 1 1 auto; min-height: 0; max-height: none; overflow-y: auto; display: flex; flex-direction: column; }
+.preview-modal .preview-main { flex: 1 0 auto; }
+.page.fill .filter-panel { overflow-y: auto; }
+.page.fill .split { flex-wrap: nowrap; }
+@media (max-width: 1100px) {
+  .page.fill { overflow-y: auto; }
+  .page.fill .split { flex-wrap: wrap; }
+  .page.fill .fill-area { flex: none; min-height: 420px; }
+}
 
 /* ---------- Stat cards (S1) ---------- */
 .stat { padding: 20px; border-radius: 12px; background: var(--surface); border: 1px solid var(--border-soft); display: flex; flex-direction: column; gap: 6px; }
@@ -300,7 +322,7 @@ td.mono, th.mono { font-family: "JetBrains Mono", Consolas, monospace; font-size
   padding: 12px 18px; color: var(--text);
 }
 .save-bar {
-  display: flex; align-items: center; gap: 12px; padding: 16px 20px;
+  display: flex; align-items: center; gap: 12px; padding: 16px 20px; flex: none;
   border: 1px solid var(--border-soft); border-radius: 12px; background: var(--surface);
 }
 

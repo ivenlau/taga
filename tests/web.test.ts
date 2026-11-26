@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { readdirSync } from 'node:fs';
 import type { Server } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createTemporaryDirectory } from '../packages/testkit/src/index.js';
@@ -394,5 +395,25 @@ describe('web workbench API', () => {
     const data = overview.data as { reviewBacklogCount: number; index: { memories: number } };
     expect(data.reviewBacklogCount).toBe(1);
     expect(data.index.memories).toBe(1);
+  });
+
+  it('serves the frontend ES module graph with javascript MIME', async () => {
+    const modules = ['app.js'];
+    const walk = (dir: string, prefix: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isDirectory()) walk(join(dir, entry.name), `${prefix}${entry.name}/`);
+        else if (entry.name.endsWith('.js')) modules.push(`${prefix}${entry.name}`);
+      }
+    };
+    walk(join(process.cwd(), 'apps', 'web', 'public', 'js'), 'js/');
+    expect(modules.length).toBeGreaterThan(1);
+    for (const file of modules) {
+      const response = await fetch(`${base}/${file}`);
+      expect(response.status, file).toBe(200);
+      expect(response.headers.get('content-type') ?? '', file).toContain('javascript');
+      expect((await response.text()).length, file).toBeGreaterThan(0);
+    }
+    const index = await (await fetch(`${base}/`)).text();
+    expect(index).toContain('<script type="module" src="/app.js"></script>');
   });
 });

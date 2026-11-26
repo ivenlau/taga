@@ -9,7 +9,7 @@ import { BrainBrowser } from '../../../packages/browsing/src/index.js';
 import { ContextPackBuilder, summarizePack } from '../../../packages/context/src/index.js';
 import { parseCandidate, parseMemory, type Candidate, type Memory, type MemoryCommand, type MemoryStatus, type MemoryType, type Scope } from '../../../packages/domain/src/index.js';
 import { DomainPackService } from '../../../packages/domain-packs/src/index.js';
-import { createLocalBgeM3Embedder, type Embedder } from '../../../packages/embedding/src/index.js';
+import { createRpcEmbedder, type Embedder } from '../../../packages/embedding/src/index.js';
 import { FtsRetrievalProvider, type SemanticRetriever } from '../../../packages/retrieval/src/index.js';
 import { RecoveryService } from '../../../packages/recovery/src/index.js';
 import { enqueueSemanticRebuild, enqueueSemanticUpsert, ZvecMemoryIndex, ZvecSemanticRetriever } from '../../../packages/semantic-index/src/index.js';
@@ -212,10 +212,10 @@ export function createWebServer(options: WebServerOptions): { readonly server: S
       for (const job of jobs) jobCounts[job.status] = (jobCounts[job.status] ?? 0) + 1;
       const indexed = database.listMemoryIndex().length;
       const audit = await new SqliteAuditLog(database).list();
-      const recent = audit.slice(-8).reverse().map(compactAudit);
+      const recent = audit.slice(-10).reverse().map(compactAudit);
       return {
         summary,
-        reviewBacklog: backlog.slice(0, 8),
+        reviewBacklog: backlog.slice(0, 10),
         reviewBacklogCount: backlog.length,
         jobs: { ...jobCounts, total: jobs.length },
         index: { memories: records.length, indexed, drift: records.length !== indexed },
@@ -455,7 +455,7 @@ export function createWebServer(options: WebServerOptions): { readonly server: S
     let retriever: SemanticRetriever | undefined;
     if (options.modelPath !== undefined) {
       try {
-        semanticEmbedder ??= createLocalBgeM3Embedder({ modelPath: options.modelPath, batchSize: 4 });
+        semanticEmbedder ??= createRpcEmbedder(brainPath);
         index = new ZvecMemoryIndex(join(brainPath, '.taga', 'semantic'));
         retriever = new ZvecSemanticRetriever({ database, index, embedder: semanticEmbedder });
       } catch {
@@ -501,6 +501,9 @@ export function createWebServer(options: WebServerOptions): { readonly server: S
           id: item.memory.id,
           status: item.memory.status,
           type: item.memory.type,
+          title: item.memory.title,
+          summary: item.memory.summary,
+          excerpt: item.memory.body.slice(0, 160),
           score: item.score,
           relevance: item.relevance,
           ...(item.lexicalScore === undefined ? {} : { lexicalScore: item.lexicalScore }),
@@ -509,7 +512,7 @@ export function createWebServer(options: WebServerOptions): { readonly server: S
           source: item.source,
         })),
         note: mode !== 'off' && !result.semanticAvailable
-          ? '语义检索不可用（模型 / 索引缺失），已降级纯 FTS5'
+          ? '语义检索不可用（daemon 未运行 / 索引缺失），已降级纯 FTS5'
           : query.get('includeDraft') === 'true'
             ? 'include_draft：draft 结果已标记并降权'
             : 'draft / candidate 未进入默认召回',
