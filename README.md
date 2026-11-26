@@ -76,6 +76,8 @@ taga init
 
 如果启用 BGE-M3，但本机没有兼容的 Transformers.js 模型，可以让向导下载经过固定 revision 和 SHA-256 校验的 `Xenova/bge-m3`。模型约 `2.1 GiB`，默认保存到 `<brain>/models/Xenova/bge-m3`；已完成文件会复用，未完成的 `.part` 文件会从断点继续。
 
+模型加载后由 taga daemon 统一持有，并通过本机 embed RPC（Unix socket / Windows 命名管道）共享给 web / MCP / CLI 复用，全机只驻留一份；daemon 不在线时这些入口自动降级为 FTS5 全文检索。
+
 自动化环境使用非交互参数：
 
 ```bash

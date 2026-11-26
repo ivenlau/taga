@@ -18,6 +18,7 @@ import { AutomaticDistillationService } from '../../../packages/distillation/src
 import { NotificationService } from '../../../packages/notifications/src/index.js';
 import { MarkdownMemoryRepository } from '../../../packages/storage/src/index.js';
 import { DatabaseStore, type JobRecord } from '../../../packages/storage/src/index.js';
+import { startEmbedRpcServer, type EmbedRpcServer, type Embedder } from '../../../packages/embedding/src/index.js';
 import { semanticJobHandlers } from './semantic.js';
 import { consolidationJobHandlers } from './consolidation.js';
 import { buildDistillerChain } from '../../../packages/distillation/src/index.js';
@@ -47,6 +48,8 @@ export interface DaemonRuntimeOptions {
   readonly clock?: () => Date;
   readonly database?: DatabaseStore;
   readonly closeDatabaseOnExit?: boolean;
+  /** When provided, the daemon serves this embedder over the local embed RPC so web / mcp / cli reuse one model. */
+  readonly embedder?: Embedder;
 }
 
 export class DaemonRuntime {
@@ -68,6 +71,15 @@ export class DaemonRuntime {
     const startedAt = lease.lock.startedAt;
     let health: DaemonHealth = this.health('starting', startedAt, 0, 0, 0, 0, 0);
     await writeDaemonHealth(lease.paths.healthPath, health);
+    let embedServer: EmbedRpcServer | undefined;
+    try {
+      if (this.options.embedder !== undefined) {
+        embedServer = await startEmbedRpcServer(this.options.brainPath, this.options.embedder);
+      }
+    } catch {
+      // the embed RPC is an optimization; the daemon keeps serving jobs without it
+      this.logger.error({ eventType: 'daemon.embed_rpc_failed', errorCode: 'EMBED_RPC_FAILED', degraded: true });
+    }
     let nextWatcherAt = 0;
     try {
       health = this.health('running', startedAt, 0, 0, 0, 0, 0);
@@ -103,6 +115,7 @@ export class DaemonRuntime {
       }
       await writeDaemonHealth(lease.paths.healthPath, { ...health, status: 'stopping', updatedAt: this.clock().toISOString() });
     } finally {
+      await embedServer?.close();
       await lease.release();
       if (this.ownsDatabase) this.database.close();
     }

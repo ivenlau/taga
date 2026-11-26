@@ -25,7 +25,7 @@ import {
   type RetrievalResult,
   type SemanticRetriever,
 } from '../../../packages/retrieval/src/index.js';
-import { createLocalBgeM3Embedder, type Embedder } from '../../../packages/embedding/src/index.js';
+import { createRpcEmbedder, type Embedder } from '../../../packages/embedding/src/index.js';
 import { enqueueSemanticUpsert, ZvecMemoryIndex, ZvecSemanticRetriever } from '../../../packages/semantic-index/src/index.js';
 import { parseMemory, type Memory } from '../../../packages/domain/src/index.js';
 import { NotificationService } from '../../../packages/notifications/src/index.js';
@@ -548,7 +548,7 @@ export class LiteMcpServer {
 
   private semanticRetriever(database: DatabaseStore): SemanticRetriever {
     this.semanticIndex ??= new ZvecMemoryIndex(join(this.brainPath, '.taga', 'semantic'));
-    this.semanticEmbedder ??= createLocalBgeM3Embedder({ modelPath: this.config.retrieval.semantic.modelPath, batchSize: 4 });
+    this.semanticEmbedder ??= createRpcEmbedder(this.brainPath);
     return new ZvecSemanticRetriever({
       database,
       index: this.semanticIndex,

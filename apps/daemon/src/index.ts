@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { AgentAdapterRegistry } from '../../../packages/adapters/src/index.js';
+import { createLocalBgeM3Embedder } from '../../../packages/embedding/src/index.js';
 import { DatabaseStore } from '../../../packages/storage/src/index.js';
 import {
   SqliteAuditLog,
@@ -32,6 +33,9 @@ export async function createDefaultDaemonRuntime(brainPath: string, suppliedConf
     brainPath,
     database,
     closeDatabaseOnExit: true,
+    ...(config.retrieval.semantic.modelPath.length === 0 ? {} : {
+      embedder: createLocalBgeM3Embedder({ modelPath: config.retrieval.semantic.modelPath, batchSize: 4 }),
+    }),
     handlers: new Map([
       ...defaultJobHandlers(brainPath, database, config),
       ['source.ingest', async (job) => { await sourceRuntime.handle(job); }],

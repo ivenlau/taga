@@ -76,6 +76,10 @@ export interface LocalBgeM3EmbedderOptions {
 export type BgeM3Pipeline = FeatureExtractionPipeline;
 export type BgeM3PipelineLoader = (modelPath: string) => Promise<BgeM3Pipeline>;
 
+// One loaded pipeline per model path per process: several embedder instances
+// (semantic jobs, consolidation, dedup checks, embed RPC) share the ~2GiB model.
+const sharedPipelineCache = new Map<string, Promise<BgeM3Pipeline>>();
+
 export function createLocalBgeM3Embedder(options: LocalBgeM3EmbedderOptions): Embedder {
   const modelId = options.modelId ?? 'Xenova/bge-m3';
   const dimensions = options.dimensions ?? 1024;
@@ -92,11 +96,15 @@ export function createLocalBgeM3Embedder(options: LocalBgeM3EmbedderOptions): Em
     batchSize,
   });
   const loader = options.loader ?? defaultBgeM3PipelineLoader;
+  const sharePipeline = options.loader === undefined;
   let pipelinePromise: Promise<BgeM3Pipeline> | undefined;
   const loadPipeline = async (): Promise<BgeM3Pipeline> => {
     if (pipelinePromise === undefined) {
-      pipelinePromise = loader(options.modelPath).catch((error: unknown) => {
+      const created = (sharePipeline ? sharedPipelineCache.get(options.modelPath) : undefined) ?? loader(options.modelPath);
+      if (sharePipeline) sharedPipelineCache.set(options.modelPath, created);
+      pipelinePromise = created.catch((error: unknown) => {
         pipelinePromise = undefined;
+        if (sharePipeline && sharedPipelineCache.get(options.modelPath) === created) sharedPipelineCache.delete(options.modelPath);
         throw classifyEmbeddingError(error);
       });
     }
@@ -331,3 +339,5 @@ function errorMessage(error: unknown): string {
 function hashText(value: string): string {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
 }
+
+export * from './rpc.js';

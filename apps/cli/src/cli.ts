@@ -56,7 +56,7 @@ import {
 } from '../../../packages/domain/src/index.js';
 import { runLearn, runLearnWatch } from '../../../packages/learning/src/index.js';
 import { FtsRetrievalProvider } from '../../../packages/retrieval/src/index.js';
-import { createLocalBgeM3Embedder, downloadBgeM3Model } from '../../../packages/embedding/src/index.js';
+import { createRpcEmbedder, downloadBgeM3Model } from '../../../packages/embedding/src/index.js';
 import {
   enqueueSemanticOptimize,
   enqueueSemanticRebuild,
@@ -1077,7 +1077,7 @@ function createCliSemanticRetriever(context: CliContext, database: DatabaseStore
   return new ZvecSemanticRetriever({
     database,
     index: new ZvecMemoryIndex(join(context.brainPath, '.taga', 'semantic')),
-    embedder: createLocalBgeM3Embedder({ modelPath: context.config.retrieval.semantic.modelPath, batchSize: 4 }),
+    embedder: createRpcEmbedder(context.brainPath),
   });
 }
 
