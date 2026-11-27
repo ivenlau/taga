@@ -56,10 +56,13 @@ describe('selectContextCandidates', () => {
     const all = await selectContextCandidates(database, {}, records);
     expect(all.source).toBe('all');
     expect(all.candidates).toHaveLength(2);
+    expect(all.degraded).toBe(false);
 
     const lexical = await selectContextCandidates(database, { task: 'retry' }, records);
     expect(lexical.source).toBe('fts5');
     expect(lexical.candidates.map((candidate) => candidate.memory.id)).toContain('memory-retry');
+    // The best lexical hit is the reference point (1.0) for the Context Pack relevance floor.
+    expect(lexical.candidates.find((candidate) => candidate.memory.id === 'memory-retry')?.relevance?.lexical).toBe(1);
 
     const entry: MemoryIndexEntry = {
       id: 'memory-retry',
@@ -84,9 +87,31 @@ describe('selectContextCandidates', () => {
     expect(hybrid.source).toBe('hybrid');
     expect(hybrid.candidates.map((candidate) => candidate.memory.id)).toContain('memory-retry');
     expect(hybrid.candidates.find((candidate) => candidate.memory.id === 'memory-retry')?.score).toBeGreaterThan(0);
+    // 1 / (1 + distance) is the semantic score, so 0.9 here means a vector distance of 0.11.
+    expect(hybrid.candidates.find((candidate) => candidate.memory.id === 'memory-retry')?.relevance?.semanticDistance).toBeCloseTo(0.11);
 
     const miss = await selectContextCandidates(database, { task: 'quantum zebra xyzzy' }, records);
     expect(miss.source).toBe('all');
+
+    database.close();
+    await fixture.cleanup();
+  });
+
+  it('reports a degraded selection when semantic retrieval fails, even with no lexical hit', async () => {
+    const fixture = await createTemporaryDirectory();
+    const database = new DatabaseStore(`${fixture.path}/taga.db`);
+    const provider = new FtsRetrievalProvider(database);
+    const records = createRecords();
+    for (const record of records) provider.upsert(record.memory, record.body);
+    const failing: SemanticRetriever = { search: () => Promise.reject(new Error('embed RPC unavailable')) };
+
+    const lexicalOnly = await selectContextCandidates(database, { task: 'retry' }, records, failing);
+    expect(lexicalOnly.source).toBe('fts5');
+    expect(lexicalOnly.degraded).toBe(true);
+
+    const empty = await selectContextCandidates(database, { task: 'quantum zebra xyzzy' }, records, failing);
+    expect(empty.source).toBe('all');
+    expect(empty.degraded).toBe(true);
 
     database.close();
     await fixture.cleanup();

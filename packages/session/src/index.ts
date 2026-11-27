@@ -3,7 +3,7 @@ import { mkdir, readdir, readFile, stat, unlink, writeFile } from 'node:fs/promi
 import { join } from 'node:path';
 import { ContextPackBuilder, type ContextCandidate, type DomainContextContribution } from '../../context/src/index.js';
 import { contextPackSchema, type ContextPack, type Memory } from '../../domain/src/index.js';
-import { FtsRetrievalProvider, type SemanticRetriever } from '../../retrieval/src/index.js';
+import { FtsRetrievalProvider, type HybridRecallCandidate, type SemanticRetriever } from '../../retrieval/src/index.js';
 import type { DatabaseStore, SessionObservation, SessionObservationInput } from '../../storage/src/index.js';
 
 export interface SessionStartInput {
@@ -25,6 +25,8 @@ export interface SessionStartResult {
   readonly source: 'cache' | 'fts5' | 'hybrid' | 'all';
   readonly stale: boolean;
   readonly cacheKey: string;
+  /** True when semantic retrieval was expected but unavailable, leaving a lexical-only selection. */
+  readonly degraded: boolean;
 }
 
 export interface SessionTimelineOptions {
@@ -61,6 +63,7 @@ export class SessionContextService {
           source: 'cache',
           stale: this.now().getTime() - Date.parse(cached.data.generatedAt) > 6 * 60 * 60 * 1000,
           cacheKey,
+          degraded: false,
         };
       }
     }
@@ -87,6 +90,7 @@ export class SessionContextService {
       source: selection.source,
       stale: false,
       cacheKey,
+      degraded: selection.degraded,
     };
   }
 
@@ -129,6 +133,8 @@ export interface SessionMemoryRecord {
 export interface SelectCandidatesResult {
   readonly candidates: readonly ContextCandidate[];
   readonly source: 'fts5' | 'hybrid' | 'all';
+  /** True when semantic retrieval failed and only lexical hits were selected. */
+  readonly degraded: boolean;
 }
 
 export async function selectContextCandidates(
@@ -140,6 +146,7 @@ export async function selectContextCandidates(
   const fallback = (): SelectCandidatesResult => ({
     candidates: records.map(({ memory, body }): ContextCandidate => ({ memory, body })),
     source: 'all',
+    degraded: false,
   });
   if (input.task === undefined) return fallback();
   const byId = new Map(records.map((record) => [record.memory.id, record]));
@@ -149,12 +156,33 @@ export async function selectContextCandidates(
     limit: 30,
   }, semantic);
   const maxScore = Math.max(1, ...retrieval.items.map((item) => item.score));
+  const lexicalScores = retrieval.items.flatMap((item) => {
+    const score = lexicalWeightOf(item);
+    return score === undefined ? [] : [score];
+  });
+  const maxLexical = Math.max(0, ...lexicalScores);
   const selected = retrieval.items.flatMap((item): ContextCandidate[] => {
     const record = byId.get(item.memory.id);
-    return record === undefined ? [] : [{ memory: record.memory, body: record.body, score: item.score / maxScore }];
+    if (record === undefined) return [];
+    const lexicalScore = lexicalWeightOf(item);
+    return [{
+      memory: record.memory,
+      body: record.body,
+      score: item.score / maxScore,
+      relevance: {
+        ...(lexicalScore === undefined || maxLexical <= 0 ? {} : { lexical: lexicalScore / maxLexical }),
+        ...(item.semanticScore === undefined ? {} : { semanticDistance: Math.max(0, 1 / item.semanticScore - 1) }),
+      },
+    }];
   });
-  if (selected.length === 0) return fallback();
-  return { candidates: selected, source: retrieval.semanticAvailable ? 'hybrid' : 'fts5' };
+  // Even an empty selection must report that semantic retrieval failed, or callers cannot tell why the pack fell back.
+  if (selected.length === 0) return { ...fallback(), degraded: retrieval.degraded };
+  return { candidates: selected, source: retrieval.semanticAvailable ? 'hybrid' : 'fts5', degraded: retrieval.degraded };
+}
+
+/** The weighted FTS score behind a hit; hybrid fusion keeps it beside the fused rank, lexical-only hits only have `score`. */
+function lexicalWeightOf(item: HybridRecallCandidate): number | undefined {
+  return item.lexicalScore ?? (item.semanticScore === undefined && item.source === 'fts5' ? item.score : undefined);
 }
 
 export function sessionCacheKey(input: Pick<SessionStartInput, 'agentId' | 'projectId' | 'task' | 'channel' | 'domainContributions'> & { readonly memoryRevision?: string }): string {

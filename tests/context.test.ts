@@ -1,7 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ContextPackBuilder, summarizePack } from '../packages/context/src/index.js';
+import { ContextPackBuilder, summarizePack, type ContextRelevance } from '../packages/context/src/index.js';
 import { markerBegin, markerEnd } from '../packages/storage/src/index.js';
 import { createTemporaryDirectory } from '../packages/testkit/src/index.js';
 import type { Memory } from '../packages/domain/src/index.js';
@@ -211,5 +211,70 @@ describe('ContextPackBuilder', () => {
     expect(stats.buckets.lessons).toEqual({ included: 1, truncated: 0 });
     expect(stats.buckets.preferences).toEqual({ included: 1, truncated: 0 });
     expect(stats.tokenEstimate).toBe(pack.tokenEstimate);
+  });
+
+  it('prints a summary only when it says more than the title and body already do', () => {
+    const pack = new ContextPackBuilder().build({
+      agentId: 'claude',
+      channel: 'mcp',
+      candidates: [{
+        memory: memory('repeated', { kind: 'global' }, 'Retry with backoff', { summary: 'Retry transient failures with a bounded delay.' }),
+        body: 'Retry transient failures with a bounded delay. Start at 100ms and double it.',
+      }],
+    }, now);
+    expect(pack.decisions.find((decision) => decision.memoryId === 'repeated')?.decision).toBe('included');
+    expect(pack.content.match(/Retry transient failures with a bounded delay\./gu)).toHaveLength(1);
+    expect(pack.content).toContain('Start at 100ms and double it.');
+  });
+
+  it('leads an unranked selection with a mix of memory types instead of scope order', () => {
+    const lessons = Array.from({ length: 12 }, (_, index) => ({
+      memory: memory(`lesson-${String(index).padStart(2, '0')}`, { kind: 'project', id: 'project-1' }, `Lesson ${index}`),
+      body: 'lesson body',
+    }));
+    const pack = new ContextPackBuilder().build({
+      agentId: 'claude',
+      projectId: 'project-1',
+      channel: 'mcp',
+      tokenBudget: 120,
+      candidates: [
+        ...lessons,
+        { memory: memory('pref', { kind: 'global' }, 'Answer in Chinese', { type: 'preferences', confidence: 0.5, summary: 'S' }), body: 'Answer in Chinese and keep it short.' },
+        { memory: memory('env', { kind: 'global' }, 'Node 22 is required', { type: 'environment', confidence: 0.5, summary: 'S' }), body: 'Node 22 is required.' },
+      ],
+    }, now);
+    const ids = pack.sections.flatMap((section) => section.memoryIds);
+    // Project lessons rank above global memories by scope; the type quota still gives preferences and environment a place.
+    expect(ids.slice(0, 2)).toEqual(['pref', 'env']);
+    expect(ids.filter((id) => id.startsWith('lesson-')).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('admits only matches above the relevance floor and falls back to the best ranked ones when nothing clears it', () => {
+    const ranked = (id: string, score: number, relevance: ContextRelevance) => ({ memory: memory(id, { kind: 'global' }, id), body: `body ${id}`, score, relevance });
+    const mixed = new ContextPackBuilder().build({
+      agentId: 'claude',
+      channel: 'mcp',
+      candidates: [
+        ranked('strong', 1, { lexical: 1 }),
+        ranked('weak', 0.3, { lexical: 0.3 }),
+        ranked('near', 0.5, { semanticDistance: 0.29 }),
+        ranked('far', 0.4, { semanticDistance: 0.8 }),
+        ranked('noise', 0.9, { lexical: 1, semanticDistance: 0.6 }),
+      ],
+    }, now);
+    expect(mixed.decisions.filter((decision) => decision.decision === 'included').map((decision) => decision.memoryId)).toEqual(['strong', 'near']);
+    expect(mixed.decisions.find((decision) => decision.memoryId === 'weak')).toMatchObject({ decision: 'excluded', reason: ['low-relevance', 'lexical-below-floor'] });
+    expect(mixed.decisions.find((decision) => decision.memoryId === 'far')).toMatchObject({ decision: 'excluded', reason: ['low-relevance', 'semantic-distance-above-floor'] });
+    // Semantic distance outranks a perfect lexical score: noise cannot sneak in on a stray word hit.
+    expect(mixed.decisions.find((decision) => decision.memoryId === 'noise')).toMatchObject({ decision: 'excluded', reason: ['low-relevance', 'lexical-below-floor+semantic-distance-above-floor'] });
+    expect(mixed.content).not.toContain('body weak');
+
+    const nothingRelevant = new ContextPackBuilder().build({
+      agentId: 'claude',
+      channel: 'mcp',
+      candidates: [1, 2, 3, 4].map((index) => ranked(`far-${index}`, 1 / index, { semanticDistance: 0.9 })),
+    }, now);
+    // The floor is a heuristic, so an empty pack is never forced by it.
+    expect(nothingRelevant.decisions.filter((decision) => decision.decision === 'included')).toHaveLength(3);
   });
 });

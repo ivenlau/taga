@@ -12,6 +12,14 @@ export interface ContextCandidate {
   readonly memory: Memory;
   readonly body: string;
   readonly score?: number;
+  readonly relevance?: ContextRelevance;
+}
+
+export interface ContextRelevance {
+  /** Lexical match strength relative to the best lexical hit of the selection (0..1); absent without a lexical hit. */
+  readonly lexical?: number;
+  /** Vector distance of the best semantic hit (0 = identical); absent without a semantic hit. */
+  readonly semanticDistance?: number;
 }
 
 export interface DomainContextContribution {
@@ -60,6 +68,16 @@ const defaultPolicy: Policy = {
 const FAMILY_INCLUDE_LIMIT = 2;
 const BUCKET_SHARE_LIMIT = 0.6;
 const FRESHNESS_WINDOW_DAYS = 90;
+// Ranked selections only admit candidates with a clear lexical or semantic signal, so weak fallback
+// matches never fill the budget. When nothing clears the floor, the best few ranked matches are kept
+// instead of an empty pack, because the floor is a heuristic. The semantic floor is calibrated for
+// BGE-M3 cosine distance on real memories: relevant top-1 hits measured 0.16-0.38, unrelated 0.34-0.42.
+const RELEVANCE_FALLBACK_TOP = 3;
+const LEXICAL_RELEVANT_FRACTION = 0.4;
+const SEMANTIC_RELEVANT_DISTANCE = 0.3;
+// Unranked selections (no task) take turns between memory types so scope ordering cannot starve one type.
+const UNRANKED_TYPE_QUOTA = 2;
+const UNRANKED_TYPE_ORDER: readonly Memory['type'][] = ['preferences', 'environment', 'projects', 'procedures', 'lessons'];
 const cjkPattern = /[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff01-\uff60\uac00-\ud7af]/gu;
 
 const NEXT_QUERY_HINT =
@@ -73,7 +91,12 @@ export class ContextPackBuilder {
     const policy = input.policy ?? defaultPolicy;
     const tokenBudget = input.tokenBudget ?? policy.staticTokenBudget;
     const nowMs = now.getTime();
+    // A ranked selection carries retrieval scores; an unranked one (no task) lists every memory.
+    const ranked = input.candidates.some((candidate) => candidate.score !== undefined);
     const sorted = [...input.candidates].sort((left, right) => compareCandidates(left, right, nowMs));
+    const ordered = ranked ? sorted : unrankedOrder(sorted);
+    const rankedCandidates = ranked ? ordered.filter((candidate) => candidate.score !== undefined) : [];
+    const floorFallback = new Set(rankedCandidates.some(isRelevant) ? [] : rankedCandidates.slice(0, RELEVANCE_FALLBACK_TOP).map((candidate) => candidate.memory.id));
     const decisions: ContextDecision[] = [];
     const sectionsByKind = new Map<ContextSection['kind'], ContextSection>();
     const titleCounts = new Map<string, number>();
@@ -105,10 +128,19 @@ export class ContextPackBuilder {
           decision: 'excluded',
           reason: [input.projectId === undefined ? 'project-context-missing' : 'project-scope-mismatch'],
         });
-        return false;
-      }
-      const family = familyKey(memory);
-      if ((familyIncluded.get(family) ?? 0) >= FAMILY_INCLUDE_LIMIT) {
+          return false;
+        }
+        if (candidate.score !== undefined && !floorFallback.has(memory.id) && !isRelevant(candidate)) {
+          decisions.push({
+            memoryId: memory.id,
+            decision: 'excluded',
+            reason: ['low-relevance', lowRelevanceDetail(candidate)],
+            budgetBucket: memory.type,
+          });
+          return false;
+        }
+        const family = familyKey(memory);
+        if ((familyIncluded.get(family) ?? 0) >= FAMILY_INCLUDE_LIMIT) {
         decisions.push({
           memoryId: memory.id,
           decision: 'excluded',
@@ -122,7 +154,7 @@ export class ContextPackBuilder {
         return true;
       }
       const idLine = `[memory_id: ${memory.id}]`;
-      const content = `${idLine}\n${memory.title}\n${memory.summary}\n${candidate.body}`;
+      const content = [idLine, memory.title, ...summaryLines(memory, candidate.body), candidate.body].join('\n');
       const fullTokens = estimateTokens(content);
       const summaryContent = `${idLine}\n${memory.title}\n${memory.summary}`;
       const summaryTokens = estimateTokens(summaryContent);
@@ -177,7 +209,7 @@ export class ContextPackBuilder {
       return false;
     };
 
-    for (const candidate of sorted) {
+    for (const candidate of ordered) {
       if (admit(candidate, true)) {
         deferred.push(candidate);
       }
@@ -293,6 +325,54 @@ function scopeRank(candidate: ContextCandidate['memory']): number {
 
 function familyKey(memory: Memory): string {
   return `${memory.type}:${memory.title}`;
+}
+
+/** The summary only spends tokens when it says something the title and body do not already carry. */
+function summaryLines(memory: Memory, body: string): readonly string[] {
+  const summary = memory.summary.trim();
+  return summary.length === 0 || summary === memory.title.trim() || body.includes(summary) ? [] : [memory.summary];
+}
+
+/** Leads with up to UNRANKED_TYPE_QUOTA memories of every type, then keeps the original order for the rest. */
+function unrankedOrder(sorted: readonly ContextCandidate[]): readonly ContextCandidate[] {
+  const byType = new Map<Memory['type'], ContextCandidate[]>();
+  for (const candidate of sorted) {
+    byType.set(candidate.memory.type, [...(byType.get(candidate.memory.type) ?? []), candidate]);
+  }
+  const types = [...byType.keys()].sort((left, right) => typeOrder(left) - typeOrder(right));
+  const first: ContextCandidate[] = [];
+  for (let round = 0; round < UNRANKED_TYPE_QUOTA; round += 1) {
+    for (const type of types) {
+      const candidate = byType.get(type)?.[round];
+      if (candidate !== undefined) first.push(candidate);
+    }
+  }
+  const taken = new Set(first.map((candidate) => candidate.memory.id));
+  return [...first, ...sorted.filter((candidate) => !taken.has(candidate.memory.id))];
+}
+
+function typeOrder(type: Memory['type']): number {
+  const index = UNRANKED_TYPE_ORDER.indexOf(type);
+  return index < 0 ? UNRANKED_TYPE_ORDER.length : index;
+}
+
+function isRelevant(candidate: ContextCandidate): boolean {
+  const relevance = candidate.relevance;
+  // Candidates ranked without match evidence are trusted as scored.
+  if (relevance === undefined) return true;
+  // Semantic distance is the stronger signal: when it exists it decides, and lexical
+  // noise (a stray prefix or trigram hit) cannot rescue an unrelated memory.
+  if (relevance.semanticDistance !== undefined) return relevance.semanticDistance <= SEMANTIC_RELEVANT_DISTANCE;
+  return relevance.lexical !== undefined && relevance.lexical >= LEXICAL_RELEVANT_FRACTION;
+}
+
+function lowRelevanceDetail(candidate: ContextCandidate): string {
+  const { lexical, semanticDistance } = candidate.relevance ?? {};
+  if (lexical === undefined && semanticDistance === undefined) return 'no-match-evidence';
+  return [
+    lexical === undefined ? null : 'lexical-below-floor',
+    semanticDistance === undefined ? null : 'semantic-distance-above-floor',
+  ].filter((detail): detail is string => detail !== null).join('+');
 }
 
 function sectionKindForMemory(type: Memory['type']): ContextSection['kind'] {
