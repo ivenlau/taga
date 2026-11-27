@@ -6,6 +6,12 @@ export interface SearchInput {
   readonly query: string;
   readonly alternates?: readonly string[];
   readonly scope?: Scope;
+  /**
+   * Search every scope regardless of project binding. Opt-in for operator consoles (web workbench);
+   * the agent-facing recall path must stay scoped: without a project context only global and
+   * domain memories are recallable.
+   */
+  readonly scopeAll?: boolean;
   readonly limit?: number;
   readonly now?: string;
   readonly includeDraft?: boolean;
@@ -512,8 +518,11 @@ function scopeForEntry(entry: MemoryIndexEntry): Scope {
   return { kind: 'global' };
 }
 
-function isRecallable(entry: MemoryIndexEntry, target?: Scope, options?: { readonly includeDraft?: boolean }): boolean {
+function isRecallable(entry: MemoryIndexEntry, target?: Scope, options?: { readonly includeDraft?: boolean; readonly scopeAll?: boolean }): boolean {
   if (entry.visibility === 'excluded') return false;
+  if (options?.scopeAll === true) {
+    return entry.status === 'active' || options.includeDraft === true && entry.status === 'draft';
+  }
   if (entry.status === 'active') return scopeMatches(entry, target);
   if (options?.includeDraft === true && entry.status === 'draft') return scopeMatches(entry, target);
   return false;

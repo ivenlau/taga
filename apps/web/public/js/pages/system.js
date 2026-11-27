@@ -182,7 +182,7 @@ function renderConfigTab(content, cfg) {
           </div>`).join('')}
         </div>
       </div>
-      <div class="rail wide" style="overflow-y:auto;flex:none">
+      <div class="rail wide" style="overflow-y:auto">
         <div class="card" id="cfg-panel">
           <div class="card-head"><h2>未保存变更</h2><div class="spacer"></div><span class="badge accent" id="cfg-count">0</span></div>
           <div id="cfg-diff"><div class="small faint">修改左侧任意配置后在此汇总，统一保存。</div></div>

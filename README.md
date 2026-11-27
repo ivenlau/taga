@@ -96,6 +96,10 @@ taga agent install --agent=codex --yes
 taga project show --json
 ```
 
+指令块只写入一个作用域：默认是当前项目的指令文件（`--scope=project`），加 `--scope=user` 则写入用户级文件。切换作用域时会移除另一作用域里残留的指令块，避免同一会话加载两份。
+
+`agent install` 还会报告 `taga-mcp` 在所选 Agent 中的注册情况：未注册时给出注册命令。对 Claude Code 可以加 `--register-mcp`，直接把服务器写进项目的 `.mcp.json`。
+
 Taga 会在 Agent 会话或项目命令实际运行时，根据当前工作目录向上寻找 Git 根目录，并优先使用规范化后的 `origin` 生成稳定项目身份；非 Git 目录使用规范化路径生成身份。项目不是初始化前置条件。
 
 ### 2. 记录和检索记忆
@@ -140,7 +144,7 @@ Taga 只维护 `taga:instructions:begin/end` 标记之间的内容，重复执�
 | `project list` | 列出 Brain 已发现的项目 |
 | `memory` | 列表、搜索、查看、编辑、反馈和生命周期管理 |
 | `context` | 构建、预览、解释和追踪 Context Pack |
-| `agent` | 检测 Agent、安装项目指令、采集会话和执行验收 |
+| `agent` | 检测 Agent、安装指令块、报告 MCP 注册、采集会话和执行验收 |
 | `daemon` | 启动、停止、安装和管理后台 daemon |
 | `vector` | 查看、重建、同步和优化语义索引 |
 | `reindex` | 从 Markdown 重建派生索引 |
@@ -306,7 +310,14 @@ taga-mcp
 - `brain_tree`、`brain_list`、`brain_summary`、`brain_detail`、`brain_rebuild`
 - `knowledge_ingest`
 
-Agent 宿主需要在自己的 MCP 配置中把启动命令指向 `taga-mcp`；路径和模型等运行参数通过 Taga 的 `config.yaml` 或环境变量管理，不在工具请求中重复传递。
+Agent 宿主需要在自己的 MCP 配置中把启动命令指向 `taga-mcp`；路径和模型等运行参数通过 Taga 的 `config.yaml` 或环境变量管理，不在工具请求中重复传递。`taga agent install` 会报告所选 Agent 是否已注册该服务器，并给出注册方式，例如：
+
+```bash
+claude mcp add --scope user taga -- taga-mcp   # Claude Code
+codex mcp add taga -- taga-mcp                 # Codex
+```
+
+工具描述会随生效的检索模式变化：语义检索关闭时提示 agent 使用关键词和标识符查询，开启时提示使用自然语言句子。
 
 Agent 开始会话时应传入实际工作目录：
 
@@ -319,7 +330,9 @@ Agent 开始会话时应传入实际工作目录：
 }
 ```
 
-`memory_session_start` 会返回 `project_id`、`project_root` 和识别来源，并将项目绑定到该 session。后续 `memory_search`、`memory_record`、`memory_feedback`、`memory_precheck` 和 `context_trace` 可以只传 `session_id`。无项目上下文时只允许召回 global/domain 记忆，不会召回任意项目记忆。
+`memory_session_start` 会返回 `project_id`、`project_root` 和识别来源，并将项目绑定到该 session。后续 `memory_search`、`memory_record`、`memory_feedback`、`memory_precheck` 和 `context_trace` 可以只传 `session_id`。无项目上下文时只允许召回 global/domain 记忆，不会召回任意项目记忆；这种情况下搜索零结果会附带提示。
+
+Context Pack 只保留有明确匹配信号的候选：向量距离大于 0.3（按 BGE-M3 余弦距离校准；语义信号存在时优先于词法信号），或词法分数低于最佳命中 40% 的弱匹配会被排除，并在 `decisions` 中标记 `low-relevance`；如果没有任何候选过线，则保留排名前三的候选。不传 `task` 时不做相关性排序，而是按类型轮流选取，让偏好和环境类记忆不被项目记忆挤掉。
 
 ## Daemon
 

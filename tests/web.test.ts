@@ -3,8 +3,10 @@ import { readdirSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import type { Server } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { DatabaseStore } from '../packages/storage/src/index.js';
+import { DatabaseStore, contentHash, writeMarkdownDocument } from '../packages/storage/src/index.js';
 import { parseMemory } from '../packages/domain/src/index.js';
+import { FtsRetrievalProvider } from '../packages/retrieval/src/index.js';
+import type { Memory } from '../packages/domain/src/index.js';
 import { GardenService } from '../packages/garden/src/index.js';
 import { createTemporaryDirectory } from '../packages/testkit/src/index.js';
 import { startWebServer } from '../apps/web/src/server.js';
@@ -66,6 +68,53 @@ describe('web workbench API', () => {
     expect(data.default).toBe('morandi');
     const ids = data.themes.map((theme) => (theme as { id: string }).id);
     expect(ids).toEqual(expect.arrayContaining(['macaron', 'morandi', 'maillard', 'forest', 'ocean', 'terracotta', 'lavender', 'graphite']));
+  });
+
+  it('searches every scope by default and narrows with an explicit scope', async () => {
+    // A project-scoped active memory, seeded straight into storage.
+    const projectMemory: Memory = {
+      schemaVersion: 1,
+      id: 'mem-web-project-scope',
+      type: 'lessons',
+      scope: { kind: 'project', id: 'project-web-test' },
+      projectId: 'project-web-test',
+      status: 'active',
+      title: 'SQLite WAL concurrency lesson',
+      summary: 'Enable WAL and busy_timeout for multi-process access',
+      confidence: 0.8,
+      sourceTrust: 'observed',
+      visibility: 'private',
+      created: '2026-11-28T00:00:00.000Z',
+      updated: '2026-11-28T00:00:00.000Z',
+      lastVerified: null,
+      lastRecalled: null,
+      reviewCount: 0,
+      usefulCount: 0,
+      notUsefulCount: 0,
+      expiresAt: null,
+      contentHash: contentHash('web project scope body'),
+      sources: [{ kind: 'test', locator: 'web.test.ts' }],
+      anchors: [],
+      tags: [],
+      supersedes: null,
+    };
+    const brain = join(fixture.path, 'brain');
+    await writeMarkdownDocument(join(brain, 'lessons', 'project', 'project-web-test', `${projectMemory.id}.md`), projectMemory, 'Turn on WAL mode when several processes share the sqlite database.');
+    const providerDatabase = new DatabaseStore(join(brain, 'taga.db'));
+    try {
+      new FtsRetrievalProvider(providerDatabase).upsert(projectMemory, 'Turn on WAL mode when several processes share the sqlite database.');
+    } finally {
+      providerDatabase.close();
+    }
+
+    // Default (operator console): project memories are searchable without a project binding.
+    const all = await call('/api/search?q=sqlite');
+    expect((all.data as { scope: string; items: { id: string }[] }).scope).toBe('all');
+    expect((all.data as { items: { id: string }[] }).items.map((item) => item.id)).toContain(projectMemory.id);
+
+    const globalOnly = await call('/api/search?q=sqlite&scope=global');
+    expect((globalOnly.data as { scope: string; items: { id: string }[] }).scope).toBe('global');
+    expect((globalOnly.data as { items: { id: string }[] }).items.map((item) => item.id)).not.toContain(projectMemory.id);
   });
 
   it('keeps draft memories out of default recall and flags them under include_draft', async () => {

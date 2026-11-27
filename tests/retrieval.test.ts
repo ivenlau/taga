@@ -50,6 +50,27 @@ describe('FTS retrieval', () => {
     await fixture.cleanup();
   });
 
+  it('recalls every scope only with the operator-console scopeAll opt-in', async () => {
+    const fixture = await createTemporaryDirectory();
+    const database = new DatabaseStore(`${fixture.path}/taga.db`);
+    const provider = new FtsRetrievalProvider(database);
+    provider.upsert(createMemory('global', { kind: 'global' }), 'global retry guidance');
+    provider.upsert(createMemory('project', { kind: 'project', id: 'project-1' }), 'project retry guidance');
+
+    // Without a project context the agent-facing path must not leak project memories.
+    expect(provider.search({ query: 'retry' }).map((result) => result.memory.id)).toEqual(['global']);
+    // The web workbench opts into searching across all projects explicitly.
+    const all = provider.search({ query: 'retry', scopeAll: true });
+    expect(all.map((result) => result.memory.id)).toEqual(['project', 'global']);
+    // Drafts stay gated unless include_draft is set, even with scopeAll.
+    provider.upsert(createMemory('scoped-draft', { kind: 'project', id: 'project-1' }, 'draft'), 'draft retry guidance');
+    expect(provider.search({ query: 'retry', scopeAll: true }).map((result) => result.memory.id)).not.toContain('scoped-draft');
+    expect(provider.search({ query: 'retry', scopeAll: true, includeDraft: true }).map((result) => result.memory.id)).toContain('scoped-draft');
+
+    database.close();
+    await fixture.cleanup();
+  });
+
   it('includes domain memories for project recall and filters unrelated domains', async () => {
     const fixture = await createTemporaryDirectory();
     const database = new DatabaseStore(`${fixture.path}/taga.db`);

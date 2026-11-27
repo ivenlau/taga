@@ -536,8 +536,16 @@ export function createWebServer(options: WebServerOptions): { readonly server: S
     if (q === undefined) throw new HttpError(400, 'INVALID_INPUT', 'q is required');
     const database = openDatabase();
     try {
+      // The workbench is the operator console: without an explicit scope it searches every
+      // project (scopeAll), unlike the agent-facing recall path where no project context
+      // means global and domain memories only.
       const scopeValue = optionalString(query.get('scope'));
       const scopeId = optionalString(query.get('scopeId'));
+      const scope = scopeValue === 'global'
+        ? { kind: 'global' as const }
+        : scopeValue === 'project' && scopeId !== undefined
+          ? { kind: 'project' as const, id: scopeId }
+          : undefined;
       const semanticParam = optionalString(query.get('semantic'));
       const mode = semanticParam === 'shadow' || semanticParam === 'on' || semanticParam === 'off'
         ? semanticParam
@@ -546,13 +554,14 @@ export function createWebServer(options: WebServerOptions): { readonly server: S
         query: q,
         limit: Number(query.get('limit') ?? '10') || 10,
         includeDraft: query.get('includeDraft') === 'true',
-        ...(scopeValue !== undefined && scopeId !== undefined ? { scope: { kind: scopeValue, id: scopeId } as Scope } : {}),
+        ...(scope === undefined ? { scopeAll: true } : { scope }),
       };
       const result = mode === 'off'
         ? await new FtsRetrievalProvider(database).searchHybrid(input, undefined)
         : await runWithSemantic(database, (retriever) => new FtsRetrievalProvider(database).searchHybrid(input, retriever));
       return {
         query: q,
+        scope: scope === undefined ? 'all' : scope.kind === 'global' ? 'global' : `project:${scope.id}`,
         semanticMode: mode,
         semanticAvailable: result.semanticAvailable,
         degraded: result.degraded,

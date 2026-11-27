@@ -8,7 +8,7 @@
     "node": ">=22 <25"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-web-public.mjs",
     "evaluate:semantic": "node scripts/evaluate-semantic.mjs",
     "evaluate:semantic:strict": "node scripts/evaluate-semantic.mjs --suite=strict-300",
     "test": "vitest run",

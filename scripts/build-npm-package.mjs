@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Assembles the publishable single `taga` package (CLI + MCP binaries with the
 // compiled tree) into ./npm-package, ready for `npm publish ./npm-package`.
-import { cp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { access, cp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -41,6 +41,13 @@ const packageManifest = {
 await rm(outDir, { recursive: true, force: true });
 await mkdir(join(outDir, 'dist'), { recursive: true });
 await cp(join(root, 'dist'), join(outDir, 'dist'), { recursive: true });
+const webAssets = join(outDir, 'dist', 'apps', 'web', 'public', 'index.html');
+try {
+  await access(webAssets);
+} catch {
+  console.error(`packaged dist is missing the web workbench assets (${webAssets}); run the build before packaging`);
+  process.exit(1);
+}
 await cp(join(root, 'README.md'), join(outDir, 'README.md'));
 try {
   await cp(join(root, 'LICENSE'), join(outDir, 'LICENSE'));
