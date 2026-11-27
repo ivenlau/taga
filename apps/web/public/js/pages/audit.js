@@ -5,10 +5,13 @@ export async function renderAudit() {
   const params = new URLSearchParams(location.hash.split('?')[1] || '');
   const actor = params.get('actor') || '';
   const action = params.get('action') || '';
+  const days = params.get('days') || '';
+  const since = params.get('since') || '';
   const offset = Math.max(0, Number(params.get('offset') || '0') || 0);
   const query = new URLSearchParams({ limit: '10', offset: String(offset) });
   if (actor) query.set('actor', actor);
   if (action) query.set('eventType', action);
+  if (since) query.set('since', since);
   const data = await api('/api/audit?' + query.toString());
   const actorColor = { web: 'var(--accent)', daemon: 'var(--info)', agent: 'var(--warn)', system: 'var(--text-muted)', user: 'var(--accent)' };
   const byDay = {};
@@ -29,7 +32,9 @@ export async function renderAudit() {
         <div class="spacer"></div>
         <div class="search-input" style="width:280px;height:34px">${icon('search', 13, 'var(--text-faint)')}
           <input placeholder="按 memory_id / request_id 过滤" id="audit-q"></div>
-        <div class="select-lite" style="height:34px">${icon('calendar', 12, 'var(--text-muted)')} 近 7 天 ${icon('chevronDown', 12)}</div>
+        <select id="audit-since" class="cfg-input" style="height:34px;width:130px">
+          ${[['', '全部时间'], ['7', '近 7 天'], ['30', '近 30 天']].map(([v, t]) => `<option value="${v}" ${days === v ? 'selected' : ''}>${t}</option>`).join('')}
+        </select>
         <button class="btn small" id="audit-csv">导出 CSV</button>
       </div>
     </div>
@@ -46,7 +51,7 @@ export async function renderAudit() {
                   <span class="mono small faint">${fmtTime(r.occurredAt).slice(11)}</span>
                   <span class="badge accent">${esc(r.actor)}${r.actorId ? '/' + esc(r.actorId) : ''}</span>
                   <span class="mono small" style="color:var(--text)">${esc(r.eventType)}</span>
-                  <span class="badge ${r.eventType.includes('forget') ? 'danger' : 'ok'}">${r.eventType.includes('forget') ? '已脱敏' : '可回滚'}</span>
+                  <span class="badge ${r.eventType.includes('forget') ? 'danger' : 'ok'}">${r.eventType.includes('forget') ? '已遗忘' : '已留痕'}</span>
                 </div>
                 <div class="small muted" style="margin-top:3px">${esc(r.reason)}</div>
                 <div class="mono small faint">${esc(r.subjectType)}/${esc(r.subjectId)}</div>
@@ -61,9 +66,8 @@ export async function renderAudit() {
           <div class="small faint">点击左侧事件查看 detail / diff。</div>
         </div>
         <div class="card">
-          <h2>回滚</h2>
-          <div class="small muted" style="line-height:1.6">变更支持回滚。回滚会生成新的审计事件（action=lifecycle.rollback），不删除历史。请在记忆详情页执行生命周期操作。</div>
-          <a class="btn danger-ghost" href="#/memories">前往记忆库</a>
+          <h2>审计说明</h2>
+          <div class="small muted" style="line-height:1.6">审计为追加式记录（actor / request_id / event hash），不提供删除。每次变更保留旧值与原因，可用于追溯与对账；遗忘仅退出召回，Markdown 归档保留。</div>
         </div>
         <div class="card">
           <h2>actor 图例</h2>
@@ -72,12 +76,24 @@ export async function renderAudit() {
         </div>
       </div>
     </div>`;
+  $('#audit-since').addEventListener('change', () => {
+    const next = new URLSearchParams();
+    if (actor) next.set('actor', actor);
+    if (action) next.set('action', action);
+    const value = $('#audit-since').value;
+    if (value) {
+      next.set('days', value);
+      next.set('since', new Date(Date.now() - Number(value) * 86400000).toISOString());
+    }
+    location.hash = '#/audit' + (next.toString() ? '?' + next.toString() : '');
+  });
   listenPage( (event) => {
     const pg = event.target.closest('[data-pager="audit"]');
     if (pg && !pg.hasAttribute('disabled')) {
       const next = new URLSearchParams();
       if (actor) next.set('actor', actor);
       if (action) next.set('action', action);
+      if (since) { next.set('days', days); next.set('since', since); }
       const page = Number(pg.dataset.page);
       if (page > 1) next.set('offset', String((page - 1) * 10));
       location.hash = '#/audit' + (next.toString() ? '?' + next.toString() : '');
@@ -88,6 +104,7 @@ export async function renderAudit() {
       const next = new URLSearchParams();
       if (chip.dataset.actor) next.set('actor', chip.dataset.actor);
       if (action) next.set('action', action);
+      if (since) { next.set('days', days); next.set('since', since); }
       location.hash = '#/audit' + (next.toString() ? '?' + next.toString() : '');
       return;
     }
@@ -96,6 +113,7 @@ export async function renderAudit() {
       const next = new URLSearchParams();
       if (actor) next.set('actor', actor);
       if (act.dataset.actionFilter) next.set('action', act.dataset.actionFilter);
+      if (since) { next.set('days', days); next.set('since', since); }
       location.hash = '#/audit' + (next.toString() ? '?' + next.toString() : '');
       return;
     }
@@ -111,7 +129,7 @@ export async function renderAudit() {
             ${Object.entries(record.payload).map(([k, v]) => `<div>${esc(k)}: ${esc(typeof v === 'object' ? JSON.stringify(v) : String(v))}</div>`).join('')}
           </div>` : ''}
         <div class="frontmatter"><div class="eyebrow">REASON</div><div>${esc(record.reason)}</div></div>
-        <a class="btn small" href="#/memories/${esc(record.subjectId)}">查看目标记忆</a>`;
+        ${record.subjectType === 'memory' ? `<a class="btn small" href="#/memories/${esc(record.subjectId)}">查看该记忆 →</a>` : ''}`;
     }
     if (event.target.closest('#audit-csv')) {
       const header = ['occurredAt', 'actor', 'eventType', 'subjectType', 'subjectId', 'reason', 'eventHash'];

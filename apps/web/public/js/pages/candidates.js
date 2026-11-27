@@ -1,5 +1,5 @@
 import { icon } from '../icons.js';
-import { PAGER, api, confirmAction, emptyState, esc, listenPage, pageEl, pagerBar, pagerClick, previewModal, toast } from '../core.js';
+import { $, PAGER, api, confirmAction, emptyState, esc, listenPage, pageEl, pagerBar, pagerClick, previewModal, toast } from '../core.js';
 
 export async function renderCandidates() {
   const params = new URLSearchParams(location.hash.split('?')[1] || '');
@@ -10,7 +10,9 @@ export async function renderCandidates() {
   let coffset = PAGER.candidates || 0;
   if (coffset >= data.items.length) { coffset = 0; PAGER.candidates = 0; }
   const visible = data.items.slice(coffset, coffset + climit);
+  const selected = new Set();
   const originOf = (id) => (String(id).includes('reflect') ? '反思 Reflect' : '蒸馏 Distill');
+  const originIcon = (id) => (String(id).includes('reflect') ? 'sprout' : 'layers');
   const factRow = (fact) => `
     <div class="row" style="gap:8px;align-items:flex-start">
       <span class="dot" style="background:var(--accent);margin-top:6px"></span>
@@ -24,7 +26,16 @@ export async function renderCandidates() {
       ${[['pending', `待审 ${counts.pending || 0}`], ['accepted', `已采纳 ${counts.accepted || 0}`], ['rejected', `已拒绝 ${counts.rejected || 0}`], ['all', `全部 ${data.total}`]]
       .map(([key, t]) => `<span class="chip ${decision === key ? 'on' : ''}" data-cand-tab="${key}">${t}</span>`).join('')}
       <div class="spacer"></div>
-      <span class="small faint">来源：MCP 观察 / daemon hook / 反思任务（本期展示 mock 数据）</span>
+      <span class="small faint">来源：蒸馏（观察 → 结构化）· 反思（记忆组 → 洞见）· 手动创建 · 存储于 SQLite</span>
+    </div>
+    <div class="row" style="background:var(--accent-soft);border:1px solid var(--accent);border-radius:10px;padding:10px 16px">
+      ${icon('check', 15, 'var(--warn)')}
+      <b class="small">已选 <span id="cand-sel-count">0</span> / ${data.items.length} 条</b>
+      <div class="spacer"></div>
+      <button class="btn small" id="cand-select-all">${icon('check', 13)}全选</button>
+      <button class="btn small" id="cand-select-clear">${icon('x', 13)}清空</button>
+      <button class="btn primary small" id="cand-batch-accept" disabled>${icon('circleCheck', 13)}批量采纳…</button>
+      <button class="btn danger-ghost small" id="cand-batch-reject" disabled>${icon('circleX', 13)}批量拒绝…</button>
     </div>
     <div class="fill-area list-card">
       <div class="list-scroll stack">
@@ -32,10 +43,11 @@ export async function renderCandidates() {
       visible.map((c) => `
       <div class="card" data-cand-preview="${esc(c.id)}" style="cursor:pointer">
         <div class="row">
-          <span class="badge ${String(c.id).includes('reflect') ? 'warn' : 'info'}">${originOf(c.id)}</span>
+          <span class="checkbox ${selected.has(c.id) ? 'on' : ''}" data-cand-sel="${esc(c.id)}"></span>
+          <span class="badge ${String(c.id).includes('reflect') ? 'warn' : 'info'}">${icon(originIcon(c.id), 12)}${originOf(c.id)}</span>
           <span class="badge neutral">${esc(c.memoryType)}</span>
           <span class="badge ${c.decision === 'accepted' ? 'ok' : c.decision === 'rejected' ? 'danger' : 'accent'}"><span class="dot"></span>${esc(c.decision)}</span>
-          ${c.worthLearning ? '<span class="badge ok">worth learning</span>' : '<span class="badge neutral">low reuse</span>'}
+          ${c.worthLearning ? `<span class="badge ok">${icon('circleCheck', 11)}worth learning</span>` : `<span class="badge neutral">${icon('alert', 11)}low reuse</span>`}
           <span class="tag">scope: ${esc(c.scopeSuggestion?.kind)}${c.scopeSuggestion?.id ? ':' + esc(c.scopeSuggestion.id) : ''}</span>
           <div class="spacer"></div>
           <span class="mono small faint">confidence</span>
@@ -47,29 +59,29 @@ export async function renderCandidates() {
         <div class="code-block scroll-y" style="font-size:11px;max-height:110px">${esc(c.body)}</div>
         ${(c.facts || []).length > 0 ? `
         <div>
-          <div class="eyebrow">FACTS · 结构化事实（引用证据）</div>
+          <div class="eyebrow">${icon('database', 12)} FACTS · 结构化事实（引用证据）</div>
           <div style="display:flex;flex-direction:column;gap:8px;margin-top:6px">${c.facts.map(factRow).join('')}</div>
         </div>` : ''}
         ${(c.entities || []).length > 0 ? `
         <div class="row" style="gap:8px">
-          <span class="eyebrow">ENTITIES</span>
+          <span class="eyebrow">${icon('package', 12)} ENTITIES</span>
           ${c.entities.map((e) => `<span class="tag">${esc(e.name)}${e.type ? ' · ' + esc(e.type) : ''}</span>`).join('')}
         </div>` : ''}
         ${(c.temporalFacts || []).length > 0 ? `
         <div>
-          <div class="eyebrow">TEMPORAL FACTS</div>
+          <div class="eyebrow">${icon('history', 12)} TEMPORAL FACTS</div>
           ${c.temporalFacts.map((t) => `<div class="mono small faint">⏱ ${esc(t.text)} ${t.occurredStart ? '（' + esc(String(t.occurredStart).slice(0, 10)) + (t.occurredEnd ? ' ~ ' + esc(String(t.occurredEnd).slice(0, 10)) : '') + '）' : ''}</div>`).join('')}
         </div>` : ''}
         ${(c.causalLinks || []).length > 0 ? `
         <div>
-          <div class="eyebrow">CAUSAL LINKS</div>
+          <div class="eyebrow">${icon('chevronRight', 12)} CAUSAL LINKS</div>
           ${c.causalLinks.map((l) => `<div class="mono small faint">${esc(String(l.fromFact))} —[${esc(l.relation)}]→ ${esc(String(l.toFact))}</div>`).join('')}
         </div>` : ''}
         ${c.applicabilityDetails ? `
         <div class="row" style="align-items:stretch">
-          <div class="cmp a" style="padding:12px 14px"><span class="eyebrow">适用条件</span>
+          <div class="cmp a" style="padding:12px 14px"><span class="eyebrow">${icon('circleCheck', 12)} 适用条件</span>
             ${(c.applicabilityDetails.conditions || []).map((t) => `<div class="small muted">✓ ${esc(t)}</div>`).join('') || '<div class="small faint">—</div>'}</div>
-          <div class="cmp b" style="padding:12px 14px"><span class="eyebrow">排除条件</span>
+          <div class="cmp b" style="padding:12px 14px"><span class="eyebrow">${icon('circleX', 12)} 排除条件</span>
             ${(c.applicabilityDetails.exclusions || []).map((t) => `<div class="small muted">✕ ${esc(t)}</div>`).join('') || '<div class="small faint">—</div>'}</div>
         </div>` : ''}
         ${c.model ? `
@@ -77,15 +89,82 @@ export async function renderCandidates() {
         <div class="mono faint" style="font-size:10px">${esc(c.id)} · evidence: ${esc((c.evidenceIds || []).join(', '))}${c.createdAt ? ' · ' + esc(String(c.createdAt).slice(0, 16).replace('T', ' ')) : ''}</div>
         ${c.decision === 'pending' ? `
         <div class="row">
-          <button class="btn primary small" data-cand="accept" data-id="${esc(c.id)}">采纳为 draft…</button>
-          <button class="btn danger-ghost small" data-cand="reject" data-id="${esc(c.id)}">拒绝…</button>
+          <button class="btn primary small" data-cand="accept" data-id="${esc(c.id)}">${icon('circleCheck', 13)}采纳为 draft…</button>
+          <button class="btn danger-ghost small" data-cand="reject" data-id="${esc(c.id)}">${icon('circleX', 13)}拒绝…</button>
           <div class="spacer"></div>
-          <span class="mono small faint">操作写入审计 · 可回滚</span>
+          <span class="mono small faint">操作写入审计 · 可追溯</span>
         </div>` : `<div class="small faint">已裁决：${esc(c.decision)}${c.decisionReason ? ' · ' + esc(c.decisionReason) : ''}${c.decidedAt ? ' · ' + esc(String(c.decidedAt).slice(0, 16).replace('T', ' ')) : ''}</div>`}
       </div>`).join('')}
       </div>
       <div class="card" style="padding:0;overflow:hidden">${pagerBar('candidates', data.items.length, coffset, climit)}</div>
     </div>`;
+
+  const refreshSel = () => {
+    const count = $('#cand-sel-count');
+    if (count) count.textContent = String(selected.size);
+    const pendingSelected = [...selected].filter((id) => data.items.find((x) => x.id === id)?.decision === 'pending').length;
+    const accept = $('#cand-batch-accept');
+    const reject = $('#cand-batch-reject');
+    if (accept) accept.disabled = pendingSelected === 0;
+    if (reject) reject.disabled = pendingSelected === 0;
+    pageEl.querySelectorAll('[data-cand-sel]').forEach((box) => {
+      box.classList.toggle('on', selected.has(box.dataset.candSel));
+    });
+  };
+
+  const runBatch = async (isAccept) => {
+    const ids = [...selected].filter((id) => data.items.find((x) => x.id === id)?.decision === 'pending');
+    const skipped = selected.size - ids.length;
+    if (ids.length === 0) return;
+    const ok = await confirmAction({
+      title: isAccept ? `批量采纳 ${ids.length} 条知识候选？` : `批量拒绝 ${ids.length} 条知识候选？`,
+      sub: ids.slice(0, 3).join(' · ') + (ids.length > 3 ? ' …' : ''),
+      body: isAccept
+        ? '采纳将为每条候选生成 draft 记忆（进入审核队列，确认后才参与召回），并标记为 accepted。'
+        : '拒绝将把所选候选标记为 rejected 并保留记录（不会生成记忆）。',
+      impact: [
+        ...ids.slice(0, 4).map((id) => `${id} → ${isAccept ? 'accepted + draft 记忆' : 'rejected'}`),
+        ...(ids.length > 4 ? [`${ids.length - 4} 条同理…`] : []),
+        ...(skipped > 0 ? [`跳过 ${skipped} 条非待审项`] : []),
+        '审计逐条记录（actor=web）',
+      ],
+      confirmLabel: isAccept ? '确认批量采纳' : '确认批量拒绝',
+      danger: !isAccept,
+    });
+    if (!ok) return;
+    let done = 0;
+    let failed = 0;
+    for (const id of ids) {
+      try {
+        await api(`/api/candidates/${id}/${isAccept ? 'accept' : 'reject'}`, {
+          method: 'POST',
+          body: JSON.stringify({ reason: isAccept ? 'batch accepted via web workbench' : 'batch rejected via web workbench' }),
+        });
+        done += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    if (failed === 0) {
+      toast('ok', isAccept ? '批量采纳完成' : '批量拒绝完成', `${done} 条${skipped > 0 ? ` · 跳过 ${skipped} 条非待审` : ''}${isAccept ? ' · draft 记忆待审核确认' : ''}`, isAccept ? '去审核队列' : '查看审计');
+    } else {
+      toast('warn', '批量操作部分失败', `成功 ${done} 条 · 失败 ${failed} 条${skipped > 0 ? ` · 跳过 ${skipped} 条非待审` : ''}`);
+    }
+    renderCandidates();
+  };
+
+  $('#cand-select-all').addEventListener('click', () => {
+    data.items.forEach((c) => selected.add(c.id));
+    refreshSel();
+  });
+  $('#cand-select-clear').addEventListener('click', () => {
+    selected.clear();
+    refreshSel();
+  });
+  $('#cand-batch-accept').addEventListener('click', () => runBatch(true));
+  $('#cand-batch-reject').addEventListener('click', () => runBatch(false));
+  refreshSel();
+
   listenPage( async (event) => {
     const tab = event.target.closest('[data-cand-tab]');
     if (tab) {
@@ -93,8 +172,16 @@ export async function renderCandidates() {
       return;
     }
     if (pagerClick(event, 'candidates', climit, renderCandidates)) return;
+    const sel = event.target.closest('[data-cand-sel]');
+    if (sel) {
+      const id = sel.dataset.candSel;
+      if (selected.has(id)) selected.delete(id);
+      else selected.add(id);
+      refreshSel();
+      return;
+    }
     const cp = event.target.closest('[data-cand-preview]');
-    if (cp && !event.target.closest('button, a')) {
+    if (cp && !event.target.closest('button, a, [data-cand-sel]')) {
       const c = data.items.find((x) => x.id === cp.dataset.candPreview);
       if (c) previewModal({
         title: c.title,

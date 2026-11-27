@@ -1,5 +1,5 @@
 import { icon } from '../icons.js';
-import { $, PAGER, api, emptyState, esc, fmtTime, kv, listenPage, pageEl, pagerBar, pagerClick, toast } from '../core.js';
+import { $, PAGER, api, emptyState, esc, fmtTime, kv, listenPage, pageEl, pagerBar, pagerClick, previewModal, toast } from '../core.js';
 import { TYPE_OPTIONS } from './memories.js';
 
 export async function renderPacks() {
@@ -10,10 +10,10 @@ export async function renderPacks() {
   if (poffset >= jobs.length) { poffset = 0; PAGER.packs = 0; }
   const jobsPage = jobs.slice(poffset, poffset + plimit);
   pageEl.innerHTML = `
-    <div class="banner warn">${icon('alert', 15, 'var(--warn)')}知识包完整管理（DomainPack 安装 / 预览）随 pack 卡接入；本页提供摄取任务队列与摄取约定。</div>
+    <div class="banner info">${icon('info', 15, 'var(--info)')}知识包是内置领域模块（DomainPack 定义随发行内置）：支持启用 / 停用与定义预览，采集证据经 pack 记录并生成建议。</div>
     <div class="card">
-      <div class="card-head"><h2>已安装知识包</h2><div class="spacer"></div><span class="mono small faint">DomainPackService</span></div>
-      ${packData.items.length === 0 ? emptyState('未安装领域包 · 可通过 knowledge_ingest 或 taga pack 导入', 'package') : `
+      <div class="card-head"><h2>内置知识包</h2><div class="spacer"></div><span class="mono small faint">DomainPackService</span></div>
+      ${packData.items.length === 0 ? emptyState('暂无内置知识包', 'package') : `
       <table>
         <thead><tr><th class="mono">pack</th><th class="mono">名称</th><th class="mono">范围</th><th class="mono">状态</th><th></th></tr></thead>
         <tbody>
@@ -22,7 +22,10 @@ export async function renderPacks() {
             <td>${esc(pack.name || pack.title || pack.id)}</td>
             <td class="mono faint">${esc(pack.contextSection || pack.domain || '—')}</td>
             <td><span class="badge ${pack.enabled ? 'ok' : 'neutral'}"><span class="dot"></span>${pack.enabled ? 'enabled' : 'disabled'}</span></td>
-            <td><button class="btn small" data-pack="${esc(pack.id)}" data-enabled="${pack.enabled ? 'false' : 'true'}">${pack.enabled ? '停用' : '启用'}</button></td>
+            <td><div class="row" style="gap:8px;justify-content:flex-end">
+              <button class="btn small" data-pack-preview="${esc(pack.id)}">预览</button>
+              <button class="btn small" data-pack="${esc(pack.id)}" data-enabled="${pack.enabled ? 'false' : 'true'}">${pack.enabled ? '停用' : '启用'}</button>
+            </div></td>
           </tr>`).join('')}
         </tbody>
       </table>`}
@@ -66,6 +69,21 @@ export async function renderPacks() {
     </div>`;
   listenPage( async (event) => {
     if (pagerClick(event, 'packs', plimit, renderPacks)) return;
+    const preview = event.target.closest('[data-pack-preview]');
+    if (preview) {
+      const pack = packData.items.find((item) => item.id === preview.dataset.packPreview);
+      if (pack) previewModal({
+        title: pack.title || pack.name || pack.id,
+        sub: `${pack.id} · ${pack.enabled ? 'enabled' : 'disabled'}`,
+        html: kv([
+          ['默认记忆类型', pack.defaultMemoryType || '—'],
+          ['上下文段', pack.contextSection || '—'],
+          ['支持来源', (pack.sourceKinds || []).join(' · ') || '—'],
+          ['隐私默认', pack.privacyDefault || 'private'],
+        ]),
+      });
+      return;
+    }
     const btn = event.target.closest('[data-pack]');
     if (!btn) return;
     try {

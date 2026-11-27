@@ -1,15 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { readFile, stat } from 'node:fs/promises';
+import { copyFile, readFile, stat, writeFile } from 'node:fs/promises';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { stringify as yamlStringify } from 'yaml';
+import { daemonStatus, startDaemonProcess, stopDaemon } from '../../../apps/daemon/src/lifecycle.js';
 import { GovernanceService, SqliteAuditLog, enqueueConsolidationScan, type LifecycleActor, type MemoryFeedbackKind } from '../../../packages/application/src/index.js';
+import { PolishService, createLlmProvider, metadataLlmBudgetState, withLlmBudget, type CandidatePolisher } from '../../../packages/distillation/src/index.js';
 import { BrainBrowser } from '../../../packages/browsing/src/index.js';
+import { configFileV4Schema, loadConfig, parseConfigText } from '../../../packages/config/src/index.js';
 import { ContextPackBuilder, summarizePack } from '../../../packages/context/src/index.js';
 import { parseCandidate, parseMemory, type Candidate, type Memory, type MemoryCommand, type MemoryStatus, type MemoryType, type Scope } from '../../../packages/domain/src/index.js';
 import { DomainPackService } from '../../../packages/domain-packs/src/index.js';
 import { createRpcEmbedder, type Embedder } from '../../../packages/embedding/src/index.js';
+import { LaunchdUserServiceManager, SystemdUserServiceManager, platformHealth } from '../../../packages/platform/src/index.js';
 import { FtsRetrievalProvider, type SemanticRetriever } from '../../../packages/retrieval/src/index.js';
 import { RecoveryService } from '../../../packages/recovery/src/index.js';
 import { enqueueSemanticRebuild, enqueueSemanticUpsert, ZvecMemoryIndex, ZvecSemanticRetriever } from '../../../packages/semantic-index/src/index.js';
@@ -36,6 +41,8 @@ export interface WebServerOptions {
     readonly model?: string;
     readonly timeoutMs?: number;
     readonly dailyCap?: number;
+    readonly dailyTokens?: number;
+    readonly perConsumerShare?: number;
     readonly apiKeySet?: boolean;
     readonly apiKey?: string;
   };
@@ -161,19 +168,41 @@ export function createWebServer(options: WebServerOptions): { readonly server: S
     { method: 'POST', segments: ['api', 'garden', 'scan'], handler: () => gardenScan() },
     { method: 'POST', segments: ['api', 'garden', ':id', 'review'], handler: (ctx) => gardenReview(ctx) },
     { method: 'GET', segments: ['api', 'projects'], handler: () => projects() },
+    { method: 'POST', segments: ['api', 'projects', 'collect'], handler: () => collectNow() },
     { method: 'GET', segments: ['api', 'jobs'], handler: () => jobs() },
     { method: 'POST', segments: ['api', 'jobs', ':id', 'retry'], handler: (ctx) => retryJob(ctx) },
+    { method: 'POST', segments: ['api', 'jobs', 'clear'], handler: (ctx) => clearJobs(ctx) },
+    { method: 'POST', segments: ['api', 'jobs', 'rerun'], handler: (ctx) => rerunJobs(ctx) },
     { method: 'GET', segments: ['api', 'system'], handler: () => system() },
+    { method: 'GET', segments: ['api', 'llm', 'usage'], handler: () => llmUsage() },
+    { method: 'GET', segments: ['api', 'system', 'doctor'], handler: () => systemDoctor() },
+    { method: 'POST', segments: ['api', 'system', 'daemon-restart'], handler: (ctx) => daemonRestart(ctx) },
     { method: 'GET', segments: ['api', 'candidates'], handler: (ctx) => listCandidates(ctx) },
     { method: 'POST', segments: ['api', 'candidates'], handler: (ctx) => createCandidate(ctx) },
     { method: 'POST', segments: ['api', 'candidates', ':id', 'accept'], handler: (ctx) => acceptCandidate(ctx) },
     { method: 'POST', segments: ['api', 'candidates', ':id', 'reject'], handler: (ctx) => rejectCandidate(ctx) },
     { method: 'POST', segments: ['api', 'system', 'reindex'], handler: (ctx) => reindex(ctx) },
     { method: 'POST', segments: ['api', 'system', 'vector-rebuild'], handler: (ctx) => vectorRebuild(ctx) },
+    { method: 'GET', segments: ['api', 'config'], handler: () => configSnapshot() },
+    { method: 'PUT', segments: ['api', 'config'], handler: (ctx) => updateConfig(ctx) },
+    { method: 'PUT', segments: ['api', 'config', 'raw'], handler: (ctx) => updateConfigRaw(ctx) },
+    { method: 'POST', segments: ['api', 'config', 'validate'], handler: (ctx) => Promise.resolve(validateConfigText(ctx)) },
   ];
 
   function openDatabase(): DatabaseStore {
     return new DatabaseStore(databasePath);
+  }
+
+  function buildPolisher(database: DatabaseStore): CandidatePolisher | undefined {
+    const llm = options.llm;
+    if (llm?.mode !== 'on' || llm.endpoint === undefined || llm.model === undefined) return undefined;
+    const provider = createLlmProvider({ mode: 'on', endpoint: llm.endpoint, ...(llm.apiKey === undefined ? {} : { apiKey: llm.apiKey }) });
+    if (provider === undefined) return undefined;
+    return new PolishService(withLlmBudget(provider, {
+      ...(llm.dailyCap === undefined ? {} : { dailyCalls: llm.dailyCap }),
+      ...(llm.dailyTokens === undefined ? {} : { dailyTokens: llm.dailyTokens }),
+      ...(llm.perConsumerShare === undefined ? {} : { perConsumerShare: llm.perConsumerShare }),
+    }, 'polish', metadataLlmBudgetState(database)), llm.model, llm.timeoutMs ?? 30_000);
   }
 
   function matchRoute(method: string, pathname: string): { route: Route; params: Record<string, string> } | null {
@@ -243,12 +272,20 @@ export function createWebServer(options: WebServerOptions): { readonly server: S
       };
       const page = await new BrainBrowser(brainPath, database).list(filter);
       const needle = optionalString(query.get('q'))?.toLowerCase();
-      const filtered = (needle === undefined
+      const updatedAfter = optionalString(query.get('updatedAfter'));
+      const sort = optionalString(query.get('sort')) ?? 'updated-desc';
+      let filtered = needle === undefined
         ? page.items
         : page.items.filter((memory) =>
-          memory.title.toLowerCase().includes(needle) || memory.summary.toLowerCase().includes(needle) || memory.id.toLowerCase().includes(needle)))
-        .slice()
-        .sort((left, right) => String(right.updated ?? '').localeCompare(String(left.updated ?? '')));
+          memory.title.toLowerCase().includes(needle) || memory.summary.toLowerCase().includes(needle) || memory.id.toLowerCase().includes(needle));
+      if (updatedAfter !== undefined) {
+        filtered = filtered.filter((memory) => String(memory.updated ?? '') >= updatedAfter);
+      }
+      filtered = filtered.slice().sort((left, right) => {
+        if (sort === 'updated-asc') return String(left.updated ?? '').localeCompare(String(right.updated ?? ''));
+        if (sort === 'title') return String(left.title ?? '').localeCompare(String(right.title ?? ''));
+        return String(right.updated ?? '').localeCompare(String(left.updated ?? ''));
+      });
       return { items: filtered.slice(offset, offset + limit), total: filtered.length, offset, limit };
     } finally {
       database.close();
@@ -308,11 +345,33 @@ export function createWebServer(options: WebServerOptions): { readonly server: S
     const database = openDatabase();
     try {
       const fts = new FtsRetrievalProvider(database);
-      const related = (id: string, title: string) => fts
-        .search({ query: title, limit: 6 })
-        .filter((candidate) => candidate.memory.id !== id)
-        .slice(0, 4)
-        .map((candidate) => ({ id: candidate.memory.id, score: candidate.score, reason: candidate.matchReason }));
+      const related = async (id: string, title: string, summary: string) => {
+        const byId = new Map<string, { id: string; score: number; reason: string[]; source: string }>();
+        for (const candidate of fts.search({ query: title, limit: 6 })) {
+          if (candidate.memory.id === id) continue;
+          byId.set(candidate.memory.id, { id: candidate.memory.id, score: candidate.score, reason: [...candidate.matchReason], source: 'lexical' });
+        }
+        await runWithSemantic(database, async (retriever) => {
+          if (retriever === undefined) return;
+          try {
+            const hits = await retriever.search({ query: `${title}\n${summary}`, limit: 8 });
+            for (const hit of hits) {
+              if (hit.memory.id === id) continue;
+              const existing = byId.get(hit.memory.id);
+              if (existing !== undefined) {
+                if (!existing.reason.includes('semantic')) existing.reason.push('semantic');
+                existing.source = 'hybrid';
+              } else {
+                byId.set(hit.memory.id, { id: hit.memory.id, score: Number(hit.score), reason: ['semantic'], source: 'semantic' });
+              }
+            }
+          } catch {
+            /* semantic unavailable → lexical-only related */
+          }
+        });
+        return [...byId.values()].slice(0, 6)
+          .map((entry) => ({ id: entry.id, score: entry.score, reason: entry.reason, source: entry.source }));
+      };
       const dedupOf = (memory: Memory): Record<string, unknown> | null => {
         const raw = database.getMetadata(`consolidation:dedup:${memory.id}:${memory.contentHash}`);
         if (raw === null) return null;
@@ -326,12 +385,12 @@ export function createWebServer(options: WebServerOptions): { readonly server: S
       const audit = (await new SqliteAuditLog(database).list())
         .filter((record) => record.subjectId === ctx.params.id)
         .map(compactAudit);
-      if (detail !== null) return { ...detail, audit, related: related(detail.memory.id, detail.memory.title), dedup: dedupOf(detail.memory) };
+      if (detail !== null) return { ...detail, audit, related: await related(detail.memory.id, detail.memory.title, detail.memory.summary), dedup: dedupOf(detail.memory) };
       const repository = new MarkdownMemoryRepository(brainPath);
       const archived = await repository.get(ctx.params.id!);
       if (archived === null) throw new HttpError(404, 'NOT_FOUND', `unknown memory: ${ctx.params.id}`);
       const body = (await repository.records()).find((record) => record.memory.id === ctx.params.id)?.body ?? archived.summary;
-      return { memory: archived, body, audit, related: related(archived.id, archived.title), dedup: dedupOf(archived) };
+      return { memory: archived, body, audit, related: await related(archived.id, archived.title, archived.summary), dedup: dedupOf(archived) };
     } finally {
       database.close();
     }
@@ -727,6 +786,68 @@ export function createWebServer(options: WebServerOptions): { readonly server: S
     }
   }
 
+  function jobIdsFrom(body: Record<string, unknown>): string[] {
+    const ids = Array.isArray(body.ids) ? body.ids.filter((id): id is string => typeof id === 'string') : [];
+    if (ids.length === 0) throw new HttpError(400, 'INVALID_INPUT', 'ids must be a non-empty string array');
+    return ids;
+  }
+
+  async function clearJobs(ctx: RouteContext): Promise<unknown> {
+    const ids = jobIdsFrom(requireRecord(ctx.body));
+    const database = openDatabase();
+    try {
+      const historical = ids.filter((id) => {
+        const job = database.getJob(id);
+        return job !== null && job.status !== 'running' && job.status !== 'queued';
+      });
+      const removed = database.deleteJobs(historical);
+      await new SqliteAuditLog(database).append({
+        eventType: 'job.cleared',
+        actor: WEB_ACTOR.actor,
+        ...(WEB_ACTOR.actorId === undefined ? {} : { actorId: WEB_ACTOR.actorId }),
+        subjectType: 'job',
+        subjectId: `batch-${removed}`,
+        occurredAt: now().toISOString(),
+        reason: 'historical jobs cleared via web workbench',
+        payload: { removed, requested: ids.length },
+      });
+      return { removed, requested: ids.length };
+    } finally {
+      database.close();
+    }
+  }
+
+  async function rerunJobs(ctx: RouteContext): Promise<unknown> {
+    const ids = jobIdsFrom(requireRecord(ctx.body));
+    const database = openDatabase();
+    try {
+      const queued: { readonly from: string; readonly nextId: string }[] = [];
+      for (const id of ids) {
+        const job = database.getJob(id);
+        if (job === null) continue;
+        if (job.status !== 'failed' && job.status !== 'dead' && job.status !== 'cancelled') continue;
+        const nextId = `job_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+        database.enqueueJob({ id: nextId, kind: job.kind, payload: job.payload });
+        queued.push({ from: id, nextId });
+      }
+      if (queued.length > 0) {
+        await new SqliteAuditLog(database).append({
+          eventType: 'job.rerun',
+          actor: WEB_ACTOR.actor,
+          ...(WEB_ACTOR.actorId === undefined ? {} : { actorId: WEB_ACTOR.actorId }),
+          subjectType: 'job',
+          subjectId: `batch-${queued.length}`,
+          occurredAt: now().toISOString(),
+          reason: 'failed jobs re-enqueued via web workbench',
+          payload: { queued: queued.length, requested: ids.length },
+        });
+      }
+      return { queued: queued.length, requested: ids.length, jobs: queued };
+    } finally {
+      database.close();
+    }
+  }
+
   async function vectorRebuild(ctx: RouteContext): Promise<unknown> {
     const body = requireRecord(ctx.body);
     if (body.confirm !== true) {
@@ -747,6 +868,180 @@ export function createWebServer(options: WebServerOptions): { readonly server: S
       return { queued: true };
     } finally {
       database.close();
+    }
+  }
+
+  /* ---------- config center ---------- */
+
+  type ConfigPatchKind = 'boolean' | 'string' | 'positiveInt' | 'optionalInt' | 'unitInterval' | 'featureMode' | 'stringArray';
+
+  const CONFIG_PATCH_SPEC: Readonly<Record<string, ConfigPatchKind>> = {
+    'projectResolution.preferGitRoot': 'boolean',
+    'projectResolution.preferGitRemote': 'boolean',
+    'projectResolution.markerFile': 'string',
+    'retrieval.semantic.mode': 'featureMode',
+    'retrieval.semantic.modelPath': 'string',
+    'llm.mode': 'featureMode',
+    'llm.provider': 'string',
+    'llm.endpoint': 'string',
+    'llm.model': 'string',
+    'llm.timeoutMs': 'positiveInt',
+    'llm.dailyCap': 'optionalInt',
+    'llm.dailyTokens': 'optionalInt',
+    'llm.perConsumerShare': 'unitInterval',
+    'consolidation.enabled': 'boolean',
+    'consolidation.scanIntervalMs': 'positiveInt',
+    'consolidation.promotion.minUsefulCount': 'positiveInt',
+    'consolidation.promotion.maxNotUsefulCount': 'positiveInt',
+    'consolidation.deduplication.rejectSimilarity': 'unitInterval',
+    'consolidation.deduplication.mergeSimilarity': 'unitInterval',
+    'reflection.enabled': 'boolean',
+    'reflection.intervalMs': 'positiveInt',
+    'reflection.windowDays': 'positiveInt',
+    'reflection.minGroupSize': 'positiveInt',
+    'reflection.maxGroups': 'positiveInt',
+    'learning.allowNetwork': 'boolean',
+    'collection.lookbackDays': 'positiveInt',
+    'agents.enabled': 'stringArray',
+    'agents.writeInstructions': 'boolean',
+  };
+
+  function loadWebConfig(): ReturnType<typeof loadConfig> {
+    return loadConfig({ isolatedBrainPath: brainPath, overrides: { paths: { brain: brainPath } } });
+  }
+
+  async function configSnapshot(): Promise<unknown> {
+    const loaded = await loadWebConfig();
+    return {
+      config: { ...loaded.config, llm: { ...loaded.config.llm, apiKey: undefined } },
+      sources: loaded.sources,
+      warnings: loaded.warnings,
+      raw: await readFile(loaded.configPath, 'utf8').catch(() => ''),
+      configPath: loaded.configPath,
+      env: {
+        llmApiKeySet: typeof process.env.TAGA_LLM_API_KEY === 'string' && process.env.TAGA_LLM_API_KEY.length > 0,
+        semanticMode: process.env.TAGA_SEMANTIC_MODE ?? null,
+        bgeModelPath: process.env.TAGA_BGE_M3_MODEL_PATH ?? null,
+      },
+    };
+  }
+
+  function validatePatchValue(kind: ConfigPatchKind, key: string, value: unknown): void {
+    const reject = (expected: string): never => {
+      throw new HttpError(400, 'INVALID_INPUT', `${key} expects ${expected}`);
+    };
+    switch (kind) {
+      case 'boolean': if (typeof value !== 'boolean') reject('a boolean'); return;
+      case 'string': if (typeof value !== 'string') reject('a string'); return;
+      case 'positiveInt': if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) reject('a positive integer'); return;
+      case 'optionalInt': if (value === null) return; if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) reject('null or a positive integer'); return;
+      case 'unitInterval': if (typeof value !== 'number' || !(value >= 0 && value <= 1)) reject('a number between 0 and 1'); return;
+      case 'featureMode': if (value !== 'off' && value !== 'shadow' && value !== 'on') reject('off | shadow | on'); return;
+      case 'stringArray': if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || item.length === 0)) reject('an array of non-empty strings'); return;
+    }
+  }
+
+  function setDotted(target: Record<string, unknown>, path: string, value: unknown): void {
+    const parts = path.split('.');
+    let cursor = target;
+    for (const part of parts.slice(0, -1)) {
+      const next = cursor[part];
+      if (!isRecord(next)) cursor[part] = {};
+      cursor = cursor[part] as Record<string, unknown>;
+    }
+    if (value === null) delete cursor[parts[parts.length - 1]!];
+    else cursor[parts[parts.length - 1]!] = value;
+  }
+
+  async function writeConfigFile(configPath: string, file: Record<string, unknown>, reason: string, payload: Record<string, unknown>): Promise<void> {
+    await copyFile(configPath, `${configPath}.bak`).catch(() => undefined);
+    await writeFile(configPath, yamlStringify(file, { lineWidth: 120 }), 'utf8');
+    const database = openDatabase();
+    try {
+      await new SqliteAuditLog(database).append({
+        eventType: 'config.update',
+        actor: WEB_ACTOR.actor,
+        ...(WEB_ACTOR.actorId === undefined ? {} : { actorId: WEB_ACTOR.actorId }),
+        subjectType: 'config',
+        subjectId: 'config.yaml',
+        occurredAt: now().toISOString(),
+        reason,
+        payload,
+      });
+    } finally {
+      database.close();
+    }
+  }
+
+  async function updateConfig(ctx: RouteContext): Promise<unknown> {
+    const body = requireRecord(ctx.body);
+    const changes = requireRecord(body.changes);
+    const keys = Object.keys(changes);
+    if (keys.length === 0) throw new HttpError(400, 'INVALID_INPUT', 'changes must not be empty');
+    const loaded = await loadWebConfig();
+    const blocked = keys.filter((key) => {
+      const source = loaded.sources[key];
+      return source === 'environment' || source === 'override';
+    });
+    if (blocked.length > 0) {
+      throw new HttpError(409, 'CONFIG_LOCKED', `以下配置由环境变量 / 启动参数锁定，Web 不可修改：${blocked.join(', ')}`);
+    }
+    const file: Record<string, unknown> = { schemaVersion: 4, ...(loaded.file ?? {}) };
+    const applied: Record<string, unknown> = {};
+    for (const key of keys) {
+      const kind = CONFIG_PATCH_SPEC[key];
+      if (kind === undefined) throw new HttpError(400, 'INVALID_INPUT', `unsupported config key: ${key}`);
+      validatePatchValue(kind, key, changes[key]);
+      setDotted(file, key, changes[key]);
+      applied[key] = changes[key];
+    }
+    const parsed = configFileV4Schema.safeParse(file);
+    if (!parsed.success) {
+      throw new HttpError(400, 'INVALID_INPUT', `config invalid: ${parsed.error.issues.map((issue) => issue.path.join('.')).join(', ')}`);
+    }
+    await writeConfigFile(loaded.configPath, parsed.data, optionalString(body.reason) ?? 'updated via web workbench', applied);
+    return configSnapshot();
+  }
+
+  async function updateConfigRaw(ctx: RouteContext): Promise<unknown> {
+    const body = requireRecord(ctx.body);
+    const text = optionalString(body.text);
+    if (text === undefined) throw new HttpError(400, 'INVALID_INPUT', 'text is required');
+    if (SENSITIVE_RE.test(text)) {
+      throw new HttpError(400, 'SENSITIVE_VALUE', '内容疑似包含密钥，已拒绝保存；API Key 请使用环境变量 TAGA_LLM_API_KEY');
+    }
+    let parsed: ReturnType<typeof parseConfigText>;
+    try {
+      parsed = parseConfigText(text, 'web advanced config');
+    } catch (error) {
+      throw new HttpError(400, 'INVALID_INPUT', error instanceof Error ? error.message : String(error));
+    }
+    if (parsed.legacy) throw new HttpError(400, 'INVALID_INPUT', '仅支持 schemaVersion 4 配置');
+    const checked = configFileV4Schema.safeParse({ schemaVersion: 4, ...(parsed.file ?? {}) });
+    if (!checked.success) {
+      throw new HttpError(400, 'INVALID_INPUT', `config invalid: ${checked.error.issues.map((issue) => issue.path.join('.')).join(', ')}`);
+    }
+    const loaded = await loadWebConfig();
+    await writeConfigFile(loaded.configPath, checked.data, optionalString(body.reason) ?? 'updated via web workbench (advanced)', { raw: true, warnings: parsed.warnings.length });
+    return { ...(await configSnapshot() as Record<string, unknown>), warnings: [...parsed.warnings] };
+  }
+
+  function validateConfigText(ctx: RouteContext): unknown {
+    const body = requireRecord(ctx.body);
+    const text = optionalString(body.text);
+    if (text === undefined) throw new HttpError(400, 'INVALID_INPUT', 'text is required');
+    const warnings: string[] = [];
+    if (SENSITIVE_RE.test(text)) warnings.push('疑似包含密钥 / 敏感值：请使用环境变量，不要写入 config.yaml');
+    try {
+      const parsed = parseConfigText(text, 'web validation');
+      if (parsed.legacy) warnings.push('旧版 schemaVersion 配置，请升级到 schemaVersion 4');
+      const checked = configFileV4Schema.safeParse({ schemaVersion: 4, ...(parsed.file ?? {}) });
+      if (!checked.success) {
+        return { ok: false, errors: checked.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`), warnings: [...parsed.warnings, ...warnings] };
+      }
+      return { ok: warnings.length === 0, errors: [], warnings: [...parsed.warnings, ...warnings] };
+    } catch (error) {
+      return { ok: false, errors: [error instanceof Error ? error.message : String(error)], warnings };
     }
   }
 
@@ -802,6 +1097,10 @@ export function createWebServer(options: WebServerOptions): { readonly server: S
       if (candidate.decision !== 'pending') throw new HttpError(409, 'ALREADY_DECIDED', `candidate already ${candidate.decision}`);
       const repository = new MarkdownMemoryRepository(brainPath);
       const timestamp = now().toISOString();
+      // L2 polish: one quality pass on accepted deterministic drafts; any failure keeps the draft.
+      const polisher = buildPolisher(database);
+      const polish = polisher !== undefined && candidate.model?.mode === 'deterministic' ? await polisher.polish(candidate) : null;
+      const polished = polish !== null && polish.polished;
       const memoryId = `mem_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
       const markdown = candidate.body.length > 0 ? candidate.body : candidate.summary;
       const sources = candidate.anchors.length > 0
@@ -814,9 +1113,9 @@ export function createWebServer(options: WebServerOptions): { readonly server: S
         scope: candidate.scopeSuggestion,
         projectId: candidate.scopeSuggestion.kind === 'project' ? candidate.scopeSuggestion.id : candidate.projectId ?? null,
         status: 'draft',
-        title: candidate.title,
-        summary: candidate.summary,
-        confidence: candidate.confidence,
+        title: polished ? polish.title : candidate.title,
+        summary: polished ? polish.summary : candidate.summary,
+        confidence: polished && polish.confidence !== undefined ? polish.confidence : candidate.confidence,
         sourceTrust: 'observed',
         visibility: 'private',
         created: timestamp,
@@ -847,7 +1146,7 @@ export function createWebServer(options: WebServerOptions): { readonly server: S
         subjectId: candidate.id,
         occurredAt: timestamp,
         reason: optionalString(body.reason) ?? 'accepted via web workbench',
-        payload: { memoryId: created.id },
+        payload: { memoryId: created.id, ...(polish === null ? {} : { polished }) },
       });
       return { candidate: decided, memory: created };
     } finally {
@@ -892,12 +1191,14 @@ export function createWebServer(options: WebServerOptions): { readonly server: S
       const actor = optionalString(query.get('actor'));
       const eventType = optionalString(query.get('eventType'));
       const subject = optionalString(query.get('subject'));
+      const since = optionalString(query.get('since'));
       const offset = Math.max(0, Number(query.get('offset') ?? '0') || 0);
       const limit = Math.min(500, Math.max(1, Number(query.get('limit') ?? '30') || 30));
       let records = (await new SqliteAuditLog(database).list()).map(compactAudit).reverse();
       if (actor !== undefined) records = records.filter((record) => record.actor === actor);
       if (eventType !== undefined) records = records.filter((record) => record.eventType.includes(eventType));
       if (subject !== undefined) records = records.filter((record) => record.subjectId === subject);
+      if (since !== undefined) records = records.filter((record) => record.occurredAt >= since);
       return { items: records.slice(offset, offset + limit), total: records.length, offset, limit };
     } finally {
       database.close();
@@ -949,6 +1250,15 @@ export function createWebServer(options: WebServerOptions): { readonly server: S
             }
           }
           return null;
+        })(),
+        adjudication: (() => {
+          const raw = database.getMetadata(`garden-adjudication:${proposal.id}`);
+          if (raw === null) return null;
+          try {
+            return JSON.parse(raw) as Record<string, unknown>;
+          } catch {
+            return null;
+          }
         })(),
       }));
       return { proposals: items };
@@ -1002,10 +1312,83 @@ export function createWebServer(options: WebServerOptions): { readonly server: S
     }
   }
 
+  async function collectNow(): Promise<unknown> {
+    const loaded = await loadWebConfig();
+    const agents = loaded.config.agents.enabled;
+    if (agents.length === 0) throw new HttpError(409, 'NO_AGENTS', '未启用任何 Agent（agents.enabled 为空），无可采集来源');
+    const database = openDatabase();
+    try {
+      const jobIds: string[] = [];
+      for (const agentId of agents) {
+        const jobId = `job_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+        database.enqueueJob({ id: jobId, kind: 'source.ingest', payload: JSON.stringify({ event: 'manual', agentId }) });
+        jobIds.push(jobId);
+      }
+      await new SqliteAuditLog(database).append({
+        eventType: 'source.collect',
+        actor: WEB_ACTOR.actor,
+        ...(WEB_ACTOR.actorId === undefined ? {} : { actorId: WEB_ACTOR.actorId }),
+        subjectType: 'source',
+        subjectId: 'manual',
+        occurredAt: now().toISOString(),
+        reason: 'manual collection triggered via web workbench',
+        payload: { agents, jobs: jobIds.length },
+      });
+      return { enqueued: jobIds.length, agents, jobIds };
+    } finally {
+      database.close();
+    }
+  }
+
   function jobs(): unknown {
     const database = openDatabase();
     try {
       return { items: database.listJobs() };
+    } finally {
+      database.close();
+    }
+  }
+
+  interface LlmUsageDay {
+    day: string;
+    calls: number;
+    tokens: number;
+    warned: boolean;
+    consumers: Record<string, { calls: number; tokens: number }>;
+  }
+
+  async function llmUsage(): Promise<unknown> {
+    const loaded = await loadWebConfig();
+    const database = openDatabase();
+    try {
+      const days = database.listMetadata('llm-budget:')
+        .map(({ key, value }): LlmUsageDay | null => {
+          try {
+            const parsed = JSON.parse(value) as { calls?: number; tokens?: number; warned?: boolean; consumers?: Record<string, { calls?: number; tokens?: number }> };
+            return {
+              day: key.slice('llm-budget:'.length),
+              calls: parsed.calls ?? 0,
+              tokens: parsed.tokens ?? 0,
+              warned: parsed.warned === true,
+              consumers: Object.fromEntries(Object.entries(parsed.consumers ?? {}).map(([name, usage]) => [name, { calls: usage.calls ?? 0, tokens: usage.tokens ?? 0 }])),
+            };
+          } catch {
+            return null;
+          }
+        })
+        .filter((item): item is LlmUsageDay => item !== null)
+        .sort((left, right) => right.day.localeCompare(left.day))
+        .slice(0, 7);
+      const todayKey = now().toISOString().slice(0, 10);
+      const today = days.find((item) => item.day === todayKey) ?? { day: todayKey, calls: 0, tokens: 0, warned: false, consumers: {} };
+      const limits = {
+        dailyCalls: loaded.config.llm.dailyCap ?? null,
+        dailyTokens: loaded.config.llm.dailyTokens ?? null,
+        perConsumerShare: loaded.config.llm.perConsumerShare ?? null,
+        mode: loaded.config.llm.mode,
+      };
+      const hot = (used: number, limit: number | null): boolean => limit !== null && limit > 0 && used >= limit * 0.8;
+      return { days, today, limits, warning: hot(today.calls, limits.dailyCalls) || hot(today.tokens, limits.dailyTokens) };
     } finally {
       database.close();
     }
@@ -1032,6 +1415,8 @@ export function createWebServer(options: WebServerOptions): { readonly server: S
         indexed: database.listMemoryIndex().length,
         jobs: database.listJobs().length,
         cursors: database.listMetadata('cursor:').length,
+        daemon: await daemonStatus(brainPath),
+        runtime: await webRuntimeInfo(),
         defaultTheme: DEFAULT_THEME_ID,
         semantic: {
           mode: options.semanticMode ?? 'off',
@@ -1046,6 +1431,8 @@ export function createWebServer(options: WebServerOptions): { readonly server: S
           model: options.llm?.model ?? '',
           timeoutMs: options.llm?.timeoutMs ?? 30000,
           ...(options.llm?.dailyCap === undefined ? {} : { dailyCap: options.llm.dailyCap }),
+          ...(options.llm?.dailyTokens === undefined ? {} : { dailyTokens: options.llm.dailyTokens }),
+          ...(options.llm?.perConsumerShare === undefined ? {} : { perConsumerShare: options.llm.perConsumerShare }),
           apiKeySet: options.llm?.apiKeySet === true,
         },
         notes: [
@@ -1057,6 +1444,150 @@ export function createWebServer(options: WebServerOptions): { readonly server: S
     } finally {
       database.close();
     }
+  }
+
+  async function webRuntimeInfo(): Promise<Record<string, unknown>> {
+    let version = '0.1.0';
+    for (const relative of ['../../../../package.json', '../../../package.json']) {
+      try {
+        const parsed = JSON.parse(await readFile(new URL(relative, import.meta.url), 'utf8')) as { name?: string; version?: string };
+        if (parsed.name === 'taga' && typeof parsed.version === 'string') {
+          version = parsed.version;
+          break;
+        }
+      } catch { /* candidate miss: try the next location */ }
+    }
+    return { version, node: process.versions.node, platform: process.platform, arch: process.arch, pid: process.pid };
+  }
+
+  interface DoctorCheck {
+    readonly id: string;
+    readonly name: string;
+    readonly ok: boolean;
+    readonly status: string;
+    readonly detail?: string;
+  }
+
+  async function systemDoctor(): Promise<unknown> {
+    const checks: DoctorCheck[] = [];
+    const database = openDatabase();
+    try {
+      const records = await new MarkdownMemoryRepository(brainPath).records();
+      const integrity = database.integrityCheck();
+      checks.push({ id: 'sqlite', name: 'SQLite / 完整性', ok: integrity.ok, status: integrity.ok ? 'ok' : 'failed', detail: `schemaVersion ${integrity.schemaVersion}` });
+      const indexIds = new Set(database.listMemoryIndex().map((entry) => entry.id));
+      const recordIds = records.map(({ memory }) => memory.id);
+      const missing = recordIds.filter((id) => !indexIds.has(id)).length;
+      const stale = [...indexIds].filter((id) => !recordIds.includes(id)).length;
+      checks.push({ id: 'fts', name: 'FTS5 索引', ok: integrity.ok && missing === 0, status: `indexed ${indexIds.size}/${recordIds.length}` });
+      checks.push({ id: 'drift', name: '索引漂移', ok: missing === 0 && stale === 0, status: missing === 0 && stale === 0 ? 'clean' : 'drifted', detail: `missing ${missing} · stale ${stale}` });
+      let semanticStatus = 'unavailable';
+      let zvecOk = false;
+      let zvecDetail = '';
+      try {
+        const index = new ZvecMemoryIndex(join(brainPath, '.taga', 'semantic'));
+        const integrityZvec = await index.integrity();
+        semanticStatus = integrityZvec.activeGeneration === null ? 'not-built' : integrityZvec.ok ? 'ready' : 'degraded';
+        zvecOk = true;
+        zvecDetail = integrityZvec.activeGeneration === null
+          ? '未构建（重建向量后可用）'
+          : `generation ${String(integrityZvec.activeGeneration.generationId).slice(0, 8)} · ${integrityZvec.activeGeneration.dimensions}d`;
+        index.close();
+      } catch (error) {
+        zvecDetail = error instanceof Error ? error.message : String(error);
+      }
+      checks.push({ id: 'semantic', name: '语义索引', ok: true, status: semanticStatus, detail: `semantic_mode=${options.semanticMode ?? 'off'}` });
+      checks.push({ id: 'zvec', name: 'Zvec 运行时', ok: zvecOk, status: zvecOk ? 'ok' : 'failed', detail: zvecDetail });
+      const daemon = await daemonStatus(brainPath);
+      checks.push({
+        id: 'daemon',
+        name: 'daemon',
+        ok: !daemon.stale,
+        status: daemon.running ? 'running' : daemon.stale ? 'stale-lock' : 'stopped',
+        detail: daemon.running ? `pid ${daemon.pid} · jobs ${daemon.health?.jobs.processed ?? 0}` : 'Fast Path 可独立工作',
+      });
+      const jobs = database.listJobs();
+      const failedJobs = jobs.filter((job) => job.status === 'dead' || job.status === 'failed');
+      checks.push({
+        id: 'jobs',
+        name: 'Jobs',
+        ok: failedJobs.length === 0,
+        status: failedJobs.length === 0 ? `${jobs.length} 个` : 'failed',
+        detail: failedJobs.length === 0 ? '无失败任务' : `失败 ${failedJobs.length}：${failedJobs.map((job) => job.id).join(', ')}`,
+      });
+      const pendingRecovery = database.listMetadata('recovery:').filter(({ value }) => value !== 'complete');
+      checks.push({
+        id: 'recovery',
+        name: '恢复流程',
+        ok: pendingRecovery.length === 0,
+        status: pendingRecovery.length === 0 ? 'clean' : 'pending',
+        detail: pendingRecovery.length === 0 ? '派生数据可安全重建' : `${pendingRecovery.length} 项待恢复`,
+      });
+    } finally {
+      database.close();
+    }
+    const extra = Object.entries(await platformHealth(brainPath)).map(([name, result]) => ({ name, ...result }));
+    return {
+      generatedAt: now().toISOString(),
+      checks,
+      extra,
+      okCount: checks.filter((check) => check.ok).length,
+      total: checks.length,
+    };
+  }
+
+  function webDaemonEntryPath(): string {
+    return process.env.TAGA_DAEMON_ENTRY ?? fileURLToPath(new URL('../../daemon/src/main.js', import.meta.url));
+  }
+
+  async function daemonRestart(ctx: RouteContext): Promise<unknown> {
+    const body = requireRecord(ctx.body);
+    if (body.confirm !== true) {
+      throw new HttpError(409, 'CONFIRM_REQUIRED', 'daemon restart requires explicit confirmation');
+    }
+    const loaded = await loadWebConfig();
+    const entry = webDaemonEntryPath();
+    const managerOptions = { brainPath, configPath: loaded.configPath, daemonEntryPath: entry };
+    let managed = false;
+    if (process.platform === 'linux') {
+      const manager = new SystemdUserServiceManager(managerOptions);
+      if ((await manager.status()).installed) {
+        await manager.restart();
+        managed = true;
+      }
+    } else if (process.platform === 'darwin') {
+      const manager = new LaunchdUserServiceManager(managerOptions);
+      if ((await manager.status()).installed) {
+        await manager.restart();
+        managed = true;
+      }
+    }
+    if (!managed) {
+      await stopDaemon(brainPath);
+      try {
+        await startDaemonProcess(brainPath, entry, { ...process.env, TAGA_BRAIN: brainPath, TAGA_CONFIG: loaded.configPath }, 15_000);
+      } catch (error) {
+        // slow cold starts can miss the readiness window; accept a daemon that came up late
+        const late = await daemonStatus(brainPath);
+        if (!late.running) throw error;
+      }
+    }
+    const database = openDatabase();
+    try {
+      await new SqliteAuditLog(database).append({
+        eventType: 'daemon.restart',
+        actor: WEB_ACTOR.actor,
+        ...(WEB_ACTOR.actorId === undefined ? {} : { actorId: WEB_ACTOR.actorId }),
+        subjectType: 'service',
+        subjectId: 'daemon',
+        occurredAt: now().toISOString(),
+        reason: 'daemon restarted via web workbench',
+        payload: { managed },
+      });
+    } finally {
+      database.close();
+    }
+    return { ...(await daemonStatus(brainPath)), managed };
   }
 
   async function reindex(ctx: RouteContext): Promise<unknown> {

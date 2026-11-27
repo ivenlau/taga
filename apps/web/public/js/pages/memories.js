@@ -9,12 +9,21 @@ export async function renderMemories() {
   const type = params.get('type') || '';
   const status = params.get('status') || '';
   const q = params.get('q') || '';
+  const projectId = params.get('projectId') || '';
+  const days = params.get('days') || '';
+  const sort = params.get('sort') || 'updated-desc';
   const offset = Math.max(0, Number(params.get('offset') || '0') || 0);
   const query = new URLSearchParams({ limit: '10', offset: String(offset) });
   if (type) query.set('type', type);
   if (status) query.set('status', status);
   if (q) query.set('q', q);
-  const data = await api('/api/memories?' + query.toString());
+  if (projectId) query.set('projectId', projectId);
+  if (params.get('updatedAfter')) query.set('updatedAfter', params.get('updatedAfter'));
+  if (sort !== 'updated-desc') query.set('sort', sort);
+  const [data, projectList] = await Promise.all([
+    api('/api/memories?' + query.toString()),
+    api('/api/projects').catch(() => ({ items: [] })),
+  ]);
   const counts = {};
   for (const key of [...TYPE_OPTIONS, ...STATUS_OPTIONS]) counts[key] = '';
   pageEl.classList.add('fill');
@@ -39,18 +48,25 @@ export async function renderMemories() {
         </div>
         <div style="display:flex;flex-direction:column;gap:9px">
           <div class="eyebrow">项目</div>
-          <div class="select-lite">taga · ivenlau/taga ${icon('chevronDown', 13, 'var(--text-faint)')}</div>
+          <select id="mem-project" class="cfg-input" style="width:100%">
+            <option value="">全部项目</option>
+            ${(projectList.items || []).map((p) => `<option value="${esc(p.id)}" ${projectId === p.id ? 'selected' : ''} title="${esc(p.root || '')}">${esc(p.id)}</option>`).join('')}
+          </select>
         </div>
         <div style="display:flex;flex-direction:column;gap:9px">
           <div class="eyebrow">时间</div>
-          <div class="select-lite">最近 30 天 ${icon('chevronDown', 13, 'var(--text-faint)')}</div>
+          <select id="mem-time" class="cfg-input" style="width:100%">
+            ${[['', '全部时间'], ['7', '最近 7 天'], ['30', '最近 30 天'], ['90', '最近 90 天']].map(([v, t]) => `<option value="${v}" ${days === v ? 'selected' : ''}>${t}</option>`).join('')}
+          </select>
         </div>
       </div>
       <div class="main-col">
         <div class="row">
           <div class="search-input" style="flex:1">${icon('search', 15, 'var(--text-faint)')}
             <input id="mem-q" placeholder="搜索记忆内容、ID、标签…（支持语义检索）" value="${esc(q)}"></div>
-          <div class="select-lite">更新时间 ↓ ${icon('chevronDown', 13, 'var(--text-faint)')}</div>
+          <select id="mem-sort" class="cfg-input" style="width:150px" title="排序方式">
+            ${[['updated-desc', '更新时间 ↓'], ['updated-asc', '更新时间 ↑'], ['title', '标题 A→Z']].map(([v, t]) => `<option value="${v}" ${sort === v ? 'selected' : ''}>${t}</option>`).join('')}
+          </select>
           <a class="btn primary" href="#/memories/new">新建记忆</a>
         </div>
         <div class="row">
@@ -63,13 +79,12 @@ export async function renderMemories() {
           <div class="list-scroll">
           <table>
             <thead><tr>
-              <th></th><th class="mono">记忆 ID</th><th class="mono">摘要 / 内容</th><th class="mono">类型</th>
-              <th class="mono">状态</th><th class="mono">范围</th><th class="mono">有用/无用</th><th class="mono">更新</th><th></th>
+              <th class="mono">记忆 ID</th><th class="mono">摘要 / 内容</th><th class="mono">类型</th>
+              <th class="mono">状态</th><th class="mono">范围</th><th class="mono">有用/无用</th><th class="mono">更新</th>
             </tr></thead>
             <tbody>
-              ${data.items.length === 0 ? `<tr><td colspan="9">${emptyState('没有匹配的记忆')}</td></tr>` : data.items.map((m) => `
+              ${data.items.length === 0 ? `<tr><td colspan="7">${emptyState('没有匹配的记忆')}</td></tr>` : data.items.map((m) => `
                 <tr onclick="location.hash='#/memories/${esc(m.id)}'">
-                  <td><span class="checkbox"></span></td>
                   <td class="mono">${esc(m.id)}</td>
                   <td><b>${esc(m.title)}</b><br><span class="small muted">${esc(m.summary)}</span></td>
                   <td class="mono faint">${esc(m.type)}</td>
@@ -77,7 +92,6 @@ export async function renderMemories() {
                   <td class="mono faint">${esc(m.scope?.kind)}${m.scope?.id ? ':' + esc(m.scope.id) : ''}</td>
                   <td class="mono">${m.usefulCount ?? 0} / ${m.notUsefulCount ?? 0}</td>
                   <td class="mono faint">${esc((m.updated || '').slice(0, 10))}</td>
-                  <td>${icon('more', 16, 'var(--text-faint)')}</td>
                 </tr>`).join('')}
             </tbody>
           </table>
@@ -94,6 +108,15 @@ export async function renderMemories() {
     if (activeType) next.set('type', activeType.dataset.value);
     if (activeStatus) next.set('status', activeStatus.dataset.value);
     if ($('#mem-q').value) next.set('q', $('#mem-q').value);
+    const projectSel = $('#mem-project');
+    if (projectSel && projectSel.value) next.set('projectId', projectSel.value);
+    const timeSel = $('#mem-time');
+    if (timeSel && timeSel.value) {
+      next.set('days', timeSel.value);
+      next.set('updatedAfter', new Date(Date.now() - Number(timeSel.value) * 86400000).toISOString());
+    }
+    const sortSel = $('#mem-sort');
+    if (sortSel && sortSel.value !== 'updated-desc') next.set('sort', sortSel.value);
     return next;
   };
   listenPage( (event) => {
@@ -123,6 +146,9 @@ export async function renderMemories() {
     }
   });
   $('#mem-q').addEventListener('keydown', (event) => { if (event.key === 'Enter') go(build()); });
+  $('#mem-project').addEventListener('change', () => go(build()));
+  $('#mem-time').addEventListener('change', () => go(build()));
+  $('#mem-sort').addEventListener('change', () => go(build()));
 }
 
 export function filterRow(group, value, on) {
@@ -151,7 +177,7 @@ export async function renderDetail(id) {
         <span class="tag">type: ${esc(m.type)}</span>
         ${m.projectId ? `<span class="tag">project: ${esc(m.projectId)}</span>` : ''}
         <div class="spacer"></div>
-        <span class="badge info">可回滚</span>
+        <span class="badge info">历史留痕</span>
       </div>
       <h2 style="font-size:22px;font-weight:700">${esc(m.title)}</h2>
       <div class="mono small faint">创建 ${fmtTime(m.created)} · 更新 ${fmtTime(m.updated)} · content-hash ${esc((m.contentHash || '').slice(0, 10))}… · sourceTrust ${esc(m.sourceTrust)}</div>
@@ -252,7 +278,7 @@ export async function renderDetail(id) {
               <span class="mono small" style="color:var(--warn)">${Number(rel.score).toFixed(2)}</span>
             </div>`).join('')}
         </div>
-        <div class="small faint">基于词法相关性；语义相似度随语义检索卡接入。</div>
+        <div class="small faint">词法相关 + 语义相似（daemon 在线时自动融合，离线仅词法）。</div>
       </div>`;
     }
   }));
@@ -266,7 +292,7 @@ export async function renderDetail(id) {
         const ok = await confirmAction({
           title: '确认遗忘这条记忆？', sub: `${m.id} · ${m.title}`,
           body: '该记忆将标记为 forgotten 并退出所有默认召回；Markdown 归档保留，审计事件完整记录。此操作需要输入式确认。',
-          impact: [`status：${m.status} → forgotten`, '退出 Context Pack 与搜索召回', '审计新增 lifecycle.forget（actor=web）', '可从归档恢复，但需重新确认启用'],
+          impact: [`status：${m.status} → forgotten`, '退出 Context Pack 与搜索召回', '审计新增 lifecycle.forget（actor=web）', 'Markdown 归档保留，可追溯'],
           confirmLabel: '确认遗忘', danger: true, typed: 'FORGET',
         });
         if (!ok) return;
@@ -301,7 +327,7 @@ export async function renderEdit(id) {
       ${icon('alert', 16, 'var(--danger)')}
       <div style="flex:1"><b>已阻止保存：检测到疑似敏感值</b><br>
       <span class="small">内容命中内置脱敏规则（token / API Key 模式）。请移除密钥后重试；Taga 不会把敏感值写入 Markdown、SQLite、日志或审计。</span></div>
-      <button class="btn small">查看规则</button>
+      <a class="btn small" href="#/packs">查看规则</a>
     </div>
     <div class="split fill-area">
       <div class="main-col">
@@ -350,7 +376,7 @@ export async function renderEdit(id) {
           <h2>保存影响说明</h2>
           <div class="bullet-row"><span class="d">—</span>写入 Markdown 事实源并同步派生索引</div>
           <div class="bullet-row"><span class="d">—</span>审计新增 memory.update（actor=web）</div>
-          <div class="bullet-row"><span class="d">—</span>保留旧版本，可从时间线回滚</div>
+          <div class="bullet-row"><span class="d">—</span>保留旧版本记录（标记 superseded）</div>
           ${needsConfirm ? '<div class="bullet-row"><span class="d">—</span>提交后弹出二次确认</div>' : ''}
         </div>
       </div>
@@ -358,7 +384,7 @@ export async function renderEdit(id) {
     <div class="save-bar">
       ${icon('info', 15, 'var(--info)')}
       <span class="small muted" style="flex:1">${needsConfirm
-        ? '改写 active 记忆需要二次确认，保存将写入审计（actor=web）并保留可回滚的历史版本。'
+        ? '改写 active 记忆需要二次确认，保存将写入审计（actor=web）并保留历史版本记录。'
         : '保存写入 Markdown 事实源并同步派生索引；draft 确认后才进入召回。'}</span>
       <a class="btn" href="${isNew ? '#/memories' : '#/memories/' + esc(id)}">取消</a>
       <button class="btn" id="f-save">保存草稿</button>
@@ -414,7 +440,7 @@ export async function renderEdit(id) {
       const dels = diffRows.filter(([kind]) => kind === '-').length;
       const ok = await confirmAction({
         title: '确认改写 active 记忆？', sub: `${id} · ${payload.title}`,
-        body: '改写会生成新版本并 supersede 旧记忆，写入审计并保留历史版本，可从时间线回滚。',
+        body: '改写会生成新版本并 supersede 旧记忆，写入审计并保留历史版本记录。',
         impact: [`内容变更 +${adds} / -${dels} 行`, '- 内容与元数据变更生成新 draft', '+ 旧版本标记 superseded', '审计新增 memory.superseded + memory.created（actor=web）'],
         confirmLabel: '确认提交',
       });

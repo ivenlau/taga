@@ -2,22 +2,20 @@ import { icon } from '../icons.js';
 import { $, api, confirmAction, downloadFile, emptyState, esc, fmtTime, listenPage, pageEl, setNavCounts, toast } from '../core.js';
 
 export async function renderOverview() {
-  const [data, garden] = await Promise.all([api('/api/overview'), api('/api/garden').catch(() => ({ proposals: [] }))]);
+  const [data, garden, doctor] = await Promise.all([
+    api('/api/overview'),
+    api('/api/garden').catch(() => ({ proposals: [] })),
+    api('/api/system/doctor').catch(() => null),
+  ]);
   const pendingGarden = garden.proposals.filter((p) => p.status === 'pending').length;
   const recallCount = data.audit.recent.filter((e) => e.eventType.includes('recall')).length;
   setNavCounts(data.reviewBacklogCount, pendingGarden);
   const s = data.summary;
-  const health = [
-    ['SQLite / 完整性', 'ok', 'ok', 'circleCheck'],
-    ['FTS5 索引', 'ok', 'ok', 'circleCheck'],
-    ['索引漂移', data.index.drift ? 'drifted' : 'clean', data.index.drift ? 'warn' : 'ok', data.index.drift ? 'alert' : 'circleCheck'],
-    ['语义索引', '未接入 Web', 'info', 'info'],
-    ['Zvec 运行时', '未配置', 'info', 'info'],
-    ['daemon', '运行中', 'ok', 'circleCheck'],
-    ['Jobs', `${data.jobs.total} 个`, data.jobs.dead + data.jobs.failed > 0 ? 'danger' : 'ok', data.jobs.dead + data.jobs.failed > 0 ? 'circleX' : 'circleCheck'],
-    ['恢复流程', '干净', 'ok', 'circleCheck'],
-  ];
-  const okCount = health.filter((h) => h[2] === 'ok').length;
+  const health = (doctor?.checks ?? []).map((c) => {
+    const infoish = ['not-built', 'stopped', 'stale-lock', 'unavailable', 'not-configured'].includes(c.status);
+    return [c.name, c.status, c.ok ? (infoish ? 'info' : 'ok') : 'warn', c.ok ? (infoish ? 'info' : 'circleCheck') : 'alert'];
+  });
+  const okCount = doctor?.okCount ?? 0;
   pageEl.classList.add('fill');
   pageEl.innerHTML = `
     <div class="row">
@@ -41,14 +39,15 @@ export async function renderOverview() {
     </div>
     <div class="card">
       <div class="card-head"><h2>运行健康 · doctor</h2><div class="spacer"></div>
-        <span class="badge ok">${okCount} 项通过</span>
-        <span class="badge warn">${health.length - okCount} 项需关注</span></div>
+        ${doctor ? `<span class="badge ok">${okCount} 项通过</span>
+        <span class="badge warn">${health.length - okCount} 项需关注</span>` : '<span class="badge danger">doctor 不可用</span>'}</div>
+      ${doctor === null ? emptyState('doctor 体检不可用（Web 服务异常）', 'alert', 'var(--warn)') : `
       <div class="grid cols-4">
         ${health.map(([name, status, kind, ic]) => `
           <div class="check-tile">${icon(ic, 15, `var(--${kind})`)}
             <div class="name">${esc(name)}</div>
             <div class="status" style="color:var(--${kind})">${esc(status)}</div></div>`).join('')}
-      </div>
+      </div>`}
     </div>
     <div class="grid cols-2 fill-area" style="align-items:stretch">
       <div class="card list-card">

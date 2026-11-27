@@ -24,8 +24,8 @@ export async function renderReview() {
     <div class="row" style="background:var(--accent-soft);border:1px solid var(--accent);border-radius:10px;padding:14px 20px">
       ${icon('layers', 15, 'var(--warn)')}
       <b class="small">已选 <span id="sel-count">0</span> / ${items.length} 条</b>
+      <button class="btn small" id="sel-all-page">全选本页</button>
       <div class="spacer"></div>
-      <button class="btn small" id="batch-edit">批量编辑后确认</button>
       <button class="btn danger-ghost small" id="batch-drop">批量丢弃</button>
       <button class="btn primary small" id="batch-ok">批量确认晋升</button>
     </div>
@@ -67,6 +67,19 @@ export async function renderReview() {
     }
     const pv = event.target.closest('[data-preview]');
     if (pv && !event.target.closest('button, a')) { openMemoryPreview(pv.dataset.preview); return; }
+    const selAll = event.target.closest('#sel-all-page');
+    if (selAll) {
+      const boxes = [...document.querySelectorAll('[data-sel]')];
+      const shouldOn = !boxes.every((box) => box.classList.contains('on'));
+      boxes.forEach((box) => {
+        box.classList.toggle('on', shouldOn);
+        box.innerHTML = shouldOn ? icon('check', 10) : '';
+        if (shouldOn) selected.add(box.dataset.sel);
+        else selected.delete(box.dataset.sel);
+      });
+      $('#sel-count').textContent = String(selected.size);
+      return;
+    }
     const btn = event.target.closest('[data-review], #batch-ok, #batch-drop');
     if (!btn) return;
     const ids = btn.id ? [...selected] : [btn.dataset.id];

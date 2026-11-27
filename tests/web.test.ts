@@ -1,7 +1,11 @@
 import { join } from 'node:path';
 import { readdirSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
 import type { Server } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { DatabaseStore } from '../packages/storage/src/index.js';
+import { parseMemory } from '../packages/domain/src/index.js';
+import { GardenService } from '../packages/garden/src/index.js';
 import { createTemporaryDirectory } from '../packages/testkit/src/index.js';
 import { startWebServer } from '../apps/web/src/server.js';
 
@@ -331,6 +335,41 @@ describe('web workbench API', () => {
     }
   });
 
+  it('joins conflict adjudication suggestions into the garden list', async () => {
+    const database = new DatabaseStore(join(fixture.path, 'brain', 'taga.db'));
+    const memory = (id: string, title: string, summary: string) => parseMemory({
+      schemaVersion: 1,
+      id,
+      type: 'procedures',
+      scope: { kind: 'global' },
+      projectId: null,
+      status: 'active',
+      title,
+      summary,
+      confidence: 0.9,
+      sourceTrust: 'observed',
+      visibility: 'private',
+      created: '2026-11-27T00:00:00.000Z',
+      updated: '2026-11-27T00:00:00.000Z',
+      sources: [{ kind: 'test', locator: id }],
+      contentHash: `sha256:${id}`,
+    });
+    const service = new GardenService(database, { clock: () => new Date('2026-11-27T00:00:00.000Z') });
+    const proposal = service.recordSemanticDuplicate({
+      draft: memory('mem-gj-draft', '路径比较用小写', 'Windows 路径比较先转小写。'),
+      existing: memory('mem-gj-existing', '路径比较区分大小写', 'Linux 路径比较区分大小写。'),
+      score: 0.9,
+      threshold: 0.88,
+      verdict: 'merge',
+    });
+    database.upsertMetadata(`garden-adjudication:${proposal.id}`, JSON.stringify({ verdict: 'prefer-a', reason: '平台分支', adjudicated: true }));
+    database.close();
+    const result = await call('/api/garden');
+    const items = (result.data as { proposals: { id: string; adjudication: { verdict: string; adjudicated: boolean } | null }[] }).proposals;
+    const found = items.find((item) => item.id === proposal.id);
+    expect(found?.adjudication).toMatchObject({ verdict: 'prefer-a', adjudicated: true });
+  });
+
   it('manages knowledge candidates: create, accept into draft, and reject', async () => {
     const created = await call('/api/candidates', {
       method: 'POST',
@@ -395,6 +434,140 @@ describe('web workbench API', () => {
     const data = overview.data as { reviewBacklogCount: number; index: { memories: number } };
     expect(data.reviewBacklogCount).toBe(1);
     expect(data.index.memories).toBe(1);
+  });
+
+  it('reads, validates and updates configuration with source locking', async () => {
+    const snap = await call('/api/config');
+    expect(snap.status).toBe(200);
+    const data = snap.data as { config: { llm: Record<string, unknown> }; sources: Record<string, string>; raw: string; configPath: string };
+    expect(data.config.llm.apiKey).toBeUndefined();
+    expect(data.sources['paths.brain']).toBe('override');
+    expect(typeof data.raw).toBe('string');
+
+    const valid = await call('/api/config/validate', { method: 'POST', body: JSON.stringify({ text: 'schemaVersion: 4\nreflection:\n  enabled: true\n' }) });
+    expect((valid.data as { ok: boolean }).ok).toBe(true);
+    const invalid = await call('/api/config/validate', { method: 'POST', body: JSON.stringify({ text: 'schemaVersion: [broken' }) });
+    expect((invalid.data as { ok: boolean }).ok).toBe(false);
+    const secret = await call('/api/config/validate', { method: 'POST', body: JSON.stringify({ text: 'schemaVersion: 4\nllm:\n  api_key: sk-1234567890\n' }) });
+    expect((secret.data as { warnings: string[] }).warnings.join(' ')).toContain('敏感值');
+
+    const updated = await call('/api/config', { method: 'PUT', body: JSON.stringify({ changes: { 'reflection.windowDays': 21 }, reason: 'test' }) });
+    expect(updated.status).toBe(200);
+    expect((updated.data as { config: { reflection: { windowDays: number } } }).config.reflection.windowDays).toBe(21);
+
+    const locked = await call('/api/config', { method: 'PUT', body: JSON.stringify({ changes: { 'paths.brain': 'C:/tmp/other' } }) });
+    expect(locked.status).toBe(409);
+    expect(locked.code).toBe('CONFIG_LOCKED');
+
+    const audit = await call('/api/audit?eventType=config');
+    expect((audit.data as { items: unknown[] }).items.length).toBeGreaterThan(0);
+  });
+
+  it('manages llm budget config and reports llm usage', async () => {
+    const updated = await call('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({ changes: { 'llm.dailyTokens': 500000, 'llm.perConsumerShare': 0.6 }, reason: 'test' }),
+    });
+    expect(updated.status).toBe(200);
+    const llmConfig = (updated.data as { config: { llm: { dailyTokens: number; perConsumerShare: number } } }).config.llm;
+    expect(llmConfig.dailyTokens).toBe(500000);
+    expect(llmConfig.perConsumerShare).toBe(0.6);
+
+    const day = new Date().toISOString().slice(0, 10);
+    const database = new DatabaseStore(join(fixture.path, 'brain', 'taga.db'));
+    database.upsertMetadata(`llm-budget:${day}`, JSON.stringify({
+      calls: 12,
+      tokens: 450000,
+      consumers: { distill: { calls: 10, tokens: 430000 }, learn: { calls: 2, tokens: 20000 } },
+      warned: true,
+    }));
+    database.close();
+
+    const usage = await call('/api/llm/usage');
+    expect(usage.status).toBe(200);
+    const data = usage.data as {
+      today: { day: string; calls: number; tokens: number; warned: boolean; consumers: Record<string, { calls: number }> };
+      limits: { dailyTokens: number | null };
+      warning: boolean;
+      days: unknown[];
+    };
+    expect(data.today.day).toBe(day);
+    expect(data.today.calls).toBe(12);
+    expect(data.today.tokens).toBe(450000);
+    expect(data.today.warned).toBe(true);
+    expect(data.today.consumers.distill?.calls).toBe(10);
+    expect(data.limits.dailyTokens).toBe(500000);
+    expect(data.warning).toBe(true);
+    expect(data.days.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('filters and sorts memories and audits by time, and triggers manual collection', async () => {
+    await createDraft();
+    const sorted = await call('/api/memories?sort=title');
+    expect(sorted.status).toBe(200);
+    const future = new Date(Date.now() + 86400000).toISOString();
+    const empty = await call(`/api/memories?updatedAfter=${encodeURIComponent(future)}`);
+    expect((empty.data as { total: number }).total).toBe(0);
+    const since = await call(`/api/audit?since=${encodeURIComponent(future)}`);
+    expect((since.data as { total: number }).total).toBe(0);
+
+    const deny = await call('/api/projects/collect', { method: 'POST', body: '{}' });
+    expect(deny.status).toBe(409);
+    expect(deny.code).toBe('NO_AGENTS');
+
+    await writeFile(join(fixture.path, 'brain', 'config.yaml'), 'schemaVersion: 4\nagents:\n  enabled:\n    - claude-code\n    - codex\n');
+    const collect = await call('/api/projects/collect', { method: 'POST', body: '{}' });
+    expect(collect.status).toBe(200);
+    expect((collect.data as { enqueued: number }).enqueued).toBe(2);
+    const jobs = await call('/api/jobs');
+    expect((jobs.data as { items: { kind: string }[] }).items.some((job) => job.kind === 'source.ingest')).toBe(true);
+  });
+
+  it('reports real runtime health via system and doctor endpoints', async () => {
+    const sys = await call('/api/system');
+    const s = sys.data as { daemon: { running: boolean }; runtime: { node: string; version: string; platform: string } };
+    expect(typeof s.daemon.running).toBe('boolean');
+    expect(s.runtime.node).toBe(process.versions.node);
+    expect(s.runtime.platform).toBe(process.platform);
+
+    const doctor = await call('/api/system/doctor');
+    const d = doctor.data as { checks: { id: string; ok: boolean; status: string }[]; extra: unknown[]; okCount: number; total: number };
+    expect(d.total).toBe(8);
+    expect(d.checks.map((c) => c.id)).toEqual(['sqlite', 'fts', 'drift', 'semantic', 'zvec', 'daemon', 'jobs', 'recovery']);
+    expect(d.okCount).toBeGreaterThanOrEqual(0);
+    expect(Array.isArray(d.extra)).toBe(true);
+  });
+
+  it('clears historical jobs and re-enqueues failed ones in bulk', async () => {
+    const db = new DatabaseStore(join(fixture.path, 'brain', 'taga.db'));
+    db.enqueueJob({ id: 'job-hist-1', kind: 'semantic.upsert', payload: '{}' });
+    db.acquireJob('job-hist-1', 'test-worker', 30_000);
+    db.completeJob('job-hist-1', 'test-worker');
+    db.enqueueJob({ id: 'job-fail-1', kind: 'semantic.upsert', payload: '{}' });
+    db.acquireJob('job-fail-1', 'test-worker', 30_000);
+    db.failJob('job-fail-1', 'test-worker', 'boom');
+    db.enqueueJob({ id: 'job-running-1', kind: 'semantic.upsert', payload: '{}' });
+    db.acquireJob('job-running-1', 'test-worker', 30_000);
+    db.close();
+
+    const rerun = await call('/api/jobs/rerun', { method: 'POST', body: JSON.stringify({ ids: ['job-fail-1', 'job-hist-1'] }) });
+    expect(rerun.status).toBe(200);
+    expect((rerun.data as { queued: number; requested: number }).queued).toBe(1);
+    expect((rerun.data as { requested: number }).requested).toBe(2);
+
+    const clear = await call('/api/jobs/clear', { method: 'POST', body: JSON.stringify({ ids: ['job-hist-1', 'job-running-1'] }) });
+    expect(clear.status).toBe(200);
+    expect((clear.data as { removed: number }).removed).toBe(1);
+
+    const list = await call('/api/jobs');
+    const items = (list.data as { items: { id: string }[] }).items;
+    expect(items.some((job) => job.id === 'job-hist-1')).toBe(false);
+    expect(items.some((job) => job.id === 'job-running-1')).toBe(true);
+
+    const audit = await call('/api/audit?eventType=job');
+    const events = (audit.data as { items: { eventType: string }[] }).items.map((item) => item.eventType);
+    expect(events).toContain('job.cleared');
+    expect(events).toContain('job.rerun');
   });
 
   it('serves the frontend ES module graph with javascript MIME', async () => {

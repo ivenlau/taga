@@ -50,6 +50,8 @@ const { server, url } = await startWebServer({
     model: loadedConfig.config.llm.model,
     timeoutMs: loadedConfig.config.llm.timeoutMs,
     ...(loadedConfig.config.llm.dailyCap === undefined ? {} : { dailyCap: loadedConfig.config.llm.dailyCap }),
+    ...(loadedConfig.config.llm.dailyTokens === undefined ? {} : { dailyTokens: loadedConfig.config.llm.dailyTokens }),
+    ...(loadedConfig.config.llm.perConsumerShare === undefined ? {} : { perConsumerShare: loadedConfig.config.llm.perConsumerShare }),
     apiKeySet: loadedConfig.config.llm.apiKey !== undefined,
     ...(loadedConfig.config.llm.apiKey === undefined ? {} : { apiKey: loadedConfig.config.llm.apiKey }),
   },

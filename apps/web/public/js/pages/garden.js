@@ -61,16 +61,34 @@ export async function renderGarden() {
           ${p.llm.mergedText ? `
             <div class="eyebrow">合并建议（mimo 生成）</div>
             <div class="code-block" style="font-size:12px">${esc(String(p.llm.mergedText))}</div>
-            <div class="small faint">「采纳合并稿」= 改写主记忆为合并稿（supersede + 审计）→ 淘汰重复候选 → 合并稿经审核队列确认后生效。全程可回滚。</div>
+            <div class="small faint">「采纳合并稿」= 改写主记忆为合并稿（supersede + 审计）→ 淘汰重复候选 → 合并稿经审核队列确认后生效。全程留痕可追溯。</div>
           ` : '<div class="small faint">LLM 判定无需合并文本（duplicate / keep）。</div>'}
         </div>` : ''}
+        ${p.adjudication && p.adjudication.adjudicated !== false ? `
+        <div class="card" style="background:var(--accent-soft);border-color:var(--warn);padding:16px 18px">
+          <div class="row" style="gap:10px">
+            <span class="badge ${p.adjudication.verdict === 'merge' ? 'warn' : p.adjudication.verdict === 'keep-both' ? 'ok' : 'danger'}"><span class="dot"></span>LLM 裁决建议：${esc(String(p.adjudication.verdict))}</span>
+            <span class="small muted">${esc(String(p.adjudication.reason || ''))}</span>
+          </div>
+          ${p.adjudication.mergedText ? `
+            <div class="eyebrow">合并草稿（裁决建议）</div>
+            <div class="code-block" style="font-size:12px">${esc(String(p.adjudication.mergedText))}</div>` : ''}
+          <div class="small faint">建议仅供参考；快捷按钮走治理服务执行并写审计。A/B 对应下方两块记忆（prefer-a = 保留 A）。</div>
+        </div>` : ''}
         ${p.status === 'pending' ? `
+        ${p.adjudication && p.adjudication.adjudicated !== false ? `
         <div class="row">
-          ${p.llm && p.llm.mergedText ? `<button class="btn primary small" data-adopt="${esc(p.id)}">采纳 LLM 合并稿…</button>` : ''}
+          ${p.adjudication.verdict === 'keep-both' ? `<button class="btn small" data-garden="ignored" data-id="${esc(p.id)}">按建议：保留双方…</button>` : ''}
+          ${p.adjudication.verdict === 'prefer-a' ? `<button class="btn small" data-garden="accepted" data-id="${esc(p.id)}" data-action="mark_stale" data-target="${esc((p.affectedIds || [])[1] || '')}">按建议：淘汰 B…</button>` : ''}
+          ${p.adjudication.verdict === 'prefer-b' ? `<button class="btn small" data-garden="accepted" data-id="${esc(p.id)}" data-action="mark_stale" data-target="${esc((p.affectedIds || [])[0] || '')}">按建议：淘汰 A…</button>` : ''}
+          ${p.adjudication.verdict === 'merge' && p.adjudication.mergedText ? `<button class="btn primary small" data-adopt="${esc(p.id)}">按建议：采纳合并稿…</button>` : ''}
+        </div>` : ''}
+        <div class="row">
+          ${(p.llm && p.llm.mergedText) || (p.adjudication && p.adjudication.adjudicated !== false && p.adjudication.mergedText) ? `<button class="btn primary small" data-adopt="${esc(p.id)}">采纳 LLM 合并稿…</button>` : ''}
           <button class="btn small" data-garden="accepted" data-id="${esc(p.id)}" data-action="${esc(p.suggestedAction)}" data-target="${esc((p.affectedIds || [])[0] || '')}">接受提案（${esc(p.suggestedAction)}）…</button>
           <button class="btn small" data-garden="ignored" data-id="${esc(p.id)}">忽略</button>
           <div class="spacer"></div>
-          <span class="mono small faint">裁决均写入审计 · 可回滚</span>
+          <span class="mono small faint">裁决均写入审计 · 可追溯</span>
           <button class="btn danger-ghost small" data-garden="rejected" data-id="${esc(p.id)}">拒绝</button>
         </div>` : ''}
       </div>`).join('')}
@@ -93,9 +111,10 @@ export async function renderGarden() {
     const adopt = event.target.closest('[data-adopt]');
     if (adopt) {
       const proposal = data.proposals.find((item) => item.id === adopt.dataset.adopt);
-      const primary = (proposal?.memories || []).find((m) => m.role === 'primary' && !m.missing);
-      const candidate = (proposal?.memories || []).find((m) => m.role === 'candidate' && !m.missing);
-      const mergedText = proposal?.llm?.mergedText;
+      const members = (proposal?.memories || []).filter((m) => !m.missing);
+      const primary = members.find((m) => m.role === 'primary') ?? members[0];
+      const candidate = members.find((m) => m !== primary);
+      const mergedText = proposal?.adjudication?.mergedText ?? proposal?.llm?.mergedText;
       if (!primary || !mergedText) { toast('warn', '无法采纳', '缺少主记忆或合并稿'); return; }
       const ok = await confirmAction({
         title: '采纳 LLM 合并稿？', sub: `提案 ${proposal.id}`,
@@ -104,7 +123,7 @@ export async function renderGarden() {
           `主记忆 ${primary.id} → 正文改为合并稿（supersede + 审计）`,
           candidate ? `候选 ${candidate.id} → forgotten（审计）` : '候选淘汰（审计）',
           '合并稿进入审核队列，确认后生效',
-          'actor=web · 全部可回滚',
+          'actor=web · 全部留痕',
         ],
         confirmLabel: '确认采纳并合并',
       });
@@ -137,7 +156,7 @@ export async function renderGarden() {
         if (btn.dataset.target) payload.targetId = btn.dataset.target;
         const ok = await confirmAction({
           title: '接受该治理提案？', sub: btn.dataset.id,
-          body: '接受会按建议动作执行治理变更（例如标记 stale / supersede），全部写入审计并可回滚。',
+          body: '接受会按建议动作执行治理变更（例如标记 stale / supersede），全部写入审计，可追溯。',
           impact: [`proposal: ${btn.dataset.id}`, `action: ${btn.dataset.action}`, 'actor=web · 写入审计'],
           confirmLabel: '确认接受',
         });

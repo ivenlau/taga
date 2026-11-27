@@ -1,5 +1,5 @@
 import { icon } from '../icons.js';
-import { PAGER, api, emptyState, esc, fmtTime, kv, listenPage, pageEl, pagerBar, pagerClick } from '../core.js';
+import { PAGER, api, emptyState, esc, fmtTime, kv, listenPage, pageEl, pagerBar, pagerClick, toast } from '../core.js';
 
 export async function renderProjects() {
   const data = await api('/api/projects');
@@ -23,7 +23,7 @@ export async function renderProjects() {
           <div class="row" style="padding:18px 22px 0">
             <h2>项目</h2><div class="spacer"></div>
             <span class="mono small faint">git origin / 归一化路径 → 稳定身份</span>
-            <button class="btn small">新建 .taga/project.yaml</button>
+            <span class="small faint">项目由 git / 路径自动识别，无需手动创建</span>
           </div>
           <table>
             <thead><tr><th class="mono">project_id</th><th class="mono">根路径</th><th class="mono">识别来源</th><th class="mono">canonicalKey</th><th class="mono">最近出现</th></tr></thead>
@@ -74,14 +74,22 @@ export async function renderProjects() {
           <h2>采集与游标</h2>
           ${kv([['cursor 数', String(sys.cursors)], ['采集策略', '仅本机 · 不联网 · L2 提醒可关闭'], ['观察上限', 'bounded · 去重 · 可关闭']])}
           <div class="row">
-            <button class="btn small">立即采集</button>
-            <button class="btn small">暂停采集</button>
+            <button class="btn small" id="proj-collect">立即采集…</button>
+            <a class="btn small" href="#/system">管理采集源（配置中心）</a>
           </div>
-          <div class="banner warn">采集控制走 daemon 卡；此处展示游标状态。</div>
+          <div class="banner warn">采集由 daemon 周期执行；关闭采集源请在配置中心调整 agents.enabled。</div>
         </div>
       </div>
     </div>`;
-  listenPage( (event) => { pagerClick(event, 'obs', olimit, renderProjects); });
+  listenPage(async (event) => {
+    if (pagerClick(event, 'obs', olimit, renderProjects)) return;
+    const collect = event.target.closest('#proj-collect');
+    if (!collect) return;
+    try {
+      const result = await api('/api/projects/collect', { method: 'POST', body: '{}' });
+      toast('ok', '已触发采集', `${result.enqueued} 个采集任务入队（${(result.agents || []).join(', ')}）`, '查看审计');
+    } catch (error) { toast('danger', '触发失败', error.message); }
+  });
 }
 
 /* ---------- S11 知识包 ---------- */
