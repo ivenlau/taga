@@ -299,9 +299,16 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Loade
   const legacyBrain = resolvePath(cwd, options.isolatedBrainPath ?? env.TAGA_BRAIN ?? defaultBrain);
   const legacyPath = join(legacyBrain, '_config.yaml');
   const primary = await readOptional(configPath);
-  const legacyRaw = primary === null ? await readOptional(legacyPath) : null;
-  const loadedFrom = primary === null ? (legacyRaw === null ? null : legacyPath) : configPath;
-  const parsed = parseConfigText(primary ?? legacyRaw, loadedFrom ?? 'configuration');
+  // `taga init` writes config.yaml into the brain; entry points started without --brain (taga-mcp, web)
+  // still have to see it, so an absent config file falls back to the resolved brain's config.yaml.
+  const brainFallback = primary === null ? await readOptional(join(legacyBrain, 'config.yaml')) : null;
+  const legacyRaw = primary === null && brainFallback === null ? await readOptional(legacyPath) : null;
+  const loadedFrom = primary !== null
+    ? configPath
+    : brainFallback !== null
+      ? join(legacyBrain, 'config.yaml')
+      : legacyRaw === null ? null : legacyPath;
+  const parsed = parseConfigText(primary ?? brainFallback ?? legacyRaw, loadedFrom ?? 'configuration');
   const defaults = createDefaultConfig(cwd, defaultBrain);
   const resolved = resolveLayers(defaults, parsed.file, env, options.overrides ?? {}, cwd, loadedFrom === null ? cwd : dirname(loadedFrom));
   validateResolved(resolved.config);

@@ -38,7 +38,14 @@ import {
   platformHealth,
   SystemdUserServiceManager,
 } from '../../../packages/platform/src/index.js';
-import { AgentAdapterRegistry, DEFAULT_AGENT_INSTRUCTIONS } from '../../../packages/adapters/src/index.js';
+import {
+  AgentAdapterRegistry,
+  DEFAULT_AGENT_INSTRUCTIONS,
+  isMcpServerRegistered,
+  MCP_SERVER_COMMAND,
+  MCP_SERVER_NAME,
+  mcpRegistrationGuide,
+} from '../../../packages/adapters/src/index.js';
 import {
   AgentAcceptanceService,
   AgentIngestionService,
@@ -84,6 +91,7 @@ import {
   markerEnd,
   parseManagedBlock,
   parseMarkdownDocument,
+  removeManagedBlock,
   upsertManagedBlock,
 } from '../../../packages/storage/src/index.js';
 import { selectContextCandidates, SessionContextService } from '../../../packages/session/src/index.js';
@@ -1338,29 +1346,7 @@ async function agentCommand(subcommand: string | undefined, positionals: readonl
     return { ok: true, code: 'AGENT_TARGETS', message: 'agent static targets loaded', data: adapters.map((adapter) => ({ id: adapter.id, targets: adapter.staticTargets(project.root) })) };
   }
   if (subcommand === 'install') {
-    const project = await resolveCliProject(context);
-    const requested = requestedAgentIds(selected ?? (context.config.agents.enabled.length === 0 ? 'local' : context.config.agents.enabled.join(',')), registry);
-    const targets = requested.map((id) => ({ id, targetPaths: agentTargetPaths(registry, id, project.root) }));
-    const preview = { project, agents: targets };
-    if (!isConfirmed(context.options)) throw new CliFailure(exitCodes.confirmationRequired, 'CONFIRMATION_REQUIRED', 'agent install preview is ready; rerun with --yes', preview);
-    for (const agent of targets) {
-      const primaryTarget = agent.targetPaths[0];
-      if (primaryTarget !== undefined) await ensureMarkerFile(primaryTarget);
-      for (const target of agent.targetPaths) {
-        await upsertManagedBlock(target, DEFAULT_AGENT_INSTRUCTIONS, { begin: instructionBlockBegin, end: instructionBlockEnd });
-      }
-    }
-    const enabled = [...new Set([...context.config.agents.enabled, ...requested])];
-    const updated = await loadConfig({ cwd: context.cwd, env: context.env, configPath: context.configPath, overrides: { agents: { enabled, writeInstructions: true } } });
-    await mkdir(configDirectory(context.configPath), { recursive: true });
-    await atomicWrite(context.configPath, stringifyConfig(configFileFromResolved(updated.config)));
-    const database = new DatabaseStore(context.databasePath);
-    try {
-      database.saveProjectContext(projectRecord(project));
-    } finally {
-      database.close();
-    }
-    return { ok: true, code: 'AGENT_INSTALLED', message: 'agent instructions installed for current project', data: preview };
+    return agentInstall(context, selected, registry);
   }
   if (subcommand === 'ingest') {
     if (selected !== undefined && registry.get(selected) === null) throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', `unsupported agent: ${selected}`);
@@ -1380,6 +1366,108 @@ async function agentCommand(subcommand: string | undefined, positionals: readonl
     return { ok: true, code: 'AGENT_E2E_VERIFIED', message: 'real-agent Evidence, review, and recall path verified', data: report };
   }
   throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', 'supported agent commands: status, targets, install, ingest, verify');
+}
+
+type InstructionScope = 'project' | 'user';
+
+/**
+ * Installs the instruction block into exactly one scope (project files or user-level files) and
+ * reports how to register the MCP server: the instructions do nothing without the tools.
+ */
+async function agentInstall(context: CliContext, selected: string | undefined, registry: AgentAdapterRegistry): Promise<CliResponse> {
+  const scope = instructionScope(context.options);
+  const project = await resolveCliProject(context);
+  const requested = requestedAgentIds(selected ?? (context.config.agents.enabled.length === 0 ? 'local' : context.config.agents.enabled.join(',')), registry);
+  const plans = requested.map((id) => {
+    // staticTargets() lists the project-level file first and user-level files after it.
+    const every = agentTargetPaths(registry, id, project.root);
+    const targetPaths = scope === 'project' ? every.slice(0, 1) : every.slice(1);
+    return { id, targetPaths, otherScopePaths: every.filter((path) => !targetPaths.includes(path)) };
+  });
+  const targetless = plans.find((plan) => plan.targetPaths.length === 0);
+  if (targetless !== undefined) {
+    throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', `agent ${targetless.id} has no ${scope}-level instruction file; try --scope=${scope === 'project' ? 'user' : 'project'}`);
+  }
+  const mcpJsonPath = join(project.root, '.mcp.json');
+  const mcpJsonAgents = plans.filter((plan) => mcpRegistrationGuide(plan.id, project.root, context.env).supportsMcpJson).map((plan) => plan.id);
+  const registerMcp = context.options.get('register-mcp') === true;
+  const writesMcpJson = registerMcp && mcpJsonAgents.length > 0;
+  const preview = {
+    scope,
+    project,
+    agents: plans.map((plan) => ({ id: plan.id, targetPaths: plan.targetPaths, replacesIn: plan.otherScopePaths })),
+    ...(writesMcpJson ? { mcpJson: { path: mcpJsonPath } } : {}),
+  };
+  if (!isConfirmed(context.options)) throw new CliFailure(exitCodes.confirmationRequired, 'CONFIRMATION_REQUIRED', 'agent install preview is ready; rerun with --yes', preview);
+
+  const installed: Array<{ readonly id: string; readonly targetPaths: readonly string[]; readonly removedFrom: readonly string[] }> = [];
+  for (const plan of plans) {
+    const primaryTarget = plan.targetPaths[0];
+    if (primaryTarget !== undefined) await ensureMarkerFile(primaryTarget);
+    for (const target of plan.targetPaths) {
+      await upsertManagedBlock(target, DEFAULT_AGENT_INSTRUCTIONS, { begin: instructionBlockBegin, end: instructionBlockEnd });
+    }
+    // Earlier versions wrote both scopes at once; a copy left in the other scope is loaded a second time.
+    const removedFrom: string[] = [];
+    for (const target of plan.otherScopePaths) {
+      if (await removeManagedBlock(target, { begin: instructionBlockBegin, end: instructionBlockEnd })) removedFrom.push(target);
+    }
+    installed.push({ id: plan.id, targetPaths: plan.targetPaths, removedFrom });
+  }
+  const mcpJsonStatus = writesMcpJson ? await upsertMcpJson(mcpJsonPath) : undefined;
+  const mcp: Array<{ readonly agent: string; readonly server: string; readonly command: string; readonly registered: boolean; readonly config: readonly string[]; readonly howto: string }> = [];
+  for (const plan of plans) {
+    const guide = mcpRegistrationGuide(plan.id, project.root, context.env);
+    mcp.push({ agent: plan.id, server: MCP_SERVER_NAME, command: MCP_SERVER_COMMAND, registered: await isMcpServerRegistered(guide, project.root), config: guide.configPaths, howto: guide.howto });
+  }
+  const enabled = [...new Set([...context.config.agents.enabled, ...requested])];
+  // Persist the agents change into the file the effective configuration actually came from, so an
+  // install never snapshots defaults into the user config path and shadow the brain's settings.
+  const targetConfig = context.loadedConfig.loadedFrom ?? join(context.brainPath, 'config.yaml');
+  const updated = await loadConfig({ cwd: context.cwd, env: context.env, configPath: targetConfig, overrides: { agents: { enabled, writeInstructions: true } } });
+  await mkdir(configDirectory(targetConfig), { recursive: true });
+  await atomicWrite(targetConfig, stringifyConfig(configFileFromResolved(updated.config)));
+  const database = new DatabaseStore(context.databasePath);
+  try {
+    database.saveProjectContext(projectRecord(project));
+  } finally {
+    database.close();
+  }
+  const warnings = [
+    ...installed.flatMap((agent) => agent.removedFrom.map((path) => `removed the duplicate instruction block from ${path}`)),
+    ...(registerMcp && !writesMcpJson ? ['--register-mcp skipped: none of the selected agents reads the project .mcp.json (Claude Code does)'] : []),
+    ...mcp.filter((entry) => !entry.registered).map((entry) => `MCP server "${MCP_SERVER_NAME}" is not registered for ${entry.agent}: ${entry.howto}`),
+  ];
+  return {
+    ok: true,
+    code: 'AGENT_INSTALLED',
+    message: scope === 'project' ? 'agent instructions installed for the current project' : 'agent instructions installed for the user',
+    data: { ...preview, agents: installed, mcp, ...(mcpJsonStatus === undefined ? {} : { mcpJson: { path: mcpJsonPath, status: mcpJsonStatus } }) },
+    ...(warnings.length === 0 ? {} : { warnings }),
+  };
+}
+
+function instructionScope(options: ReadonlyMap<string, string | true>): InstructionScope {
+  const value = optionString(options, 'scope') ?? 'project';
+  if (value !== 'project' && value !== 'user') throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', '--scope must be project or user');
+  return value;
+}
+
+/** Adds the taga stdio server to a project `.mcp.json` and keeps every other entry as is. */
+async function upsertMcpJson(path: string): Promise<'created' | 'updated' | 'kept'> {
+  let current: Record<string, unknown> = {};
+  let exists = true;
+  try {
+    current = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+  } catch (error) {
+    if (!isMissing(error)) throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', `${path} exists but is not valid JSON; add the "${MCP_SERVER_NAME}" server to it manually`);
+    exists = false;
+  }
+  const servers = typeof current.mcpServers === 'object' && current.mcpServers !== null ? current.mcpServers as Record<string, unknown> : {};
+  if (servers[MCP_SERVER_NAME] !== undefined) return 'kept';
+  const mcpServers = { ...servers, [MCP_SERVER_NAME]: { type: 'stdio', command: MCP_SERVER_COMMAND, args: [] } };
+  await atomicWrite(path, `${JSON.stringify({ ...current, mcpServers }, null, 2)}\n`);
+  return exists ? 'updated' : 'created';
 }
 
 async function projectCommand(subcommand: string | undefined, context: CliContext): Promise<CliResponse> {

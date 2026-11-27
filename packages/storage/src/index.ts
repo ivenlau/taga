@@ -10,6 +10,7 @@ export {
   markerEnd,
   parseManagedBlock,
   parseMarkdownDocument,
+  removeManagedBlock,
   replaceManagedBlock,
   serializeMarkdownDocument,
   upsertManagedBlock,

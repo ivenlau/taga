@@ -15,3 +15,6 @@ pnpm-debug.log*
 # <<< minispec <<<
 npm-package/
 .codegraph/
+# Local agent MCP registration products (machine-specific, written by taga agent install)
+.mcp.json
+opencode.json

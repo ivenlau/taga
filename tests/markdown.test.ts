@@ -6,6 +6,7 @@ import {
   markerBegin,
   markerEnd,
   parseMarkdownDocument,
+  removeManagedBlock,
   replaceManagedBlock,
   writeManagedBlock,
   writeMarkdownDocument,
@@ -52,6 +53,30 @@ describe('Markdown storage primitives', () => {
 
     expect(hash).toBe(contentHash(await readFile(path, 'utf8')));
     expect(parseMarkdownDocument(await readFile(path, 'utf8')).body).toBe('Body\n');
+    await fixture.cleanup();
+  });
+
+  it('removes a managed block and reports when there is none', async () => {
+    const fixture = await createTemporaryDirectory();
+    const path = join(fixture.path, 'CLAUDE.md');
+    expect(await removeManagedBlock(path)).toBe(false);
+
+    await writeFile(path, `# Notes\n\n${markerBegin}\nold\n${markerEnd}\n`, 'utf8');
+    expect(await removeManagedBlock(path)).toBe(true);
+    expect(await readFile(path, 'utf8')).toBe('# Notes\n');
+
+    await writeFile(path, `${markerBegin}\nold\n${markerEnd}\n\n# Notes\n`, 'utf8');
+    expect(await removeManagedBlock(path)).toBe(true);
+    expect(await readFile(path, 'utf8')).toBe('# Notes\n');
+
+    await writeFile(path, '# Notes\n', 'utf8');
+    expect(await removeManagedBlock(path)).toBe(false);
+    expect(await readFile(path, 'utf8')).toBe('# Notes\n');
+
+    // An unbalanced block is not Taga's to touch.
+    await writeFile(path, `${markerBegin}\nold\n`, 'utf8');
+    expect(await removeManagedBlock(path)).toBe(false);
+    expect(await readFile(path, 'utf8')).toBe(`${markerBegin}\nold\n`);
     await fixture.cleanup();
   });
 });

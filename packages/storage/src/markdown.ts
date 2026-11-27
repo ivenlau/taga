@@ -139,6 +139,26 @@ export async function upsertManagedBlock(
   await atomicWrite(path, updated);
 }
 
+/** Removes a managed block from a file; false when the file or the block is absent. */
+export async function removeManagedBlock(
+  path: string,
+  markers: ManagedBlockMarkers = defaultMarkers,
+): Promise<boolean> {
+  let current: string;
+  try {
+    current = await readFile(path, 'utf8');
+  } catch (error) {
+    if (!isMissingFile(error)) throw error;
+    return false;
+  }
+  if (!current.includes(markers.begin) || !current.includes(markers.end)) return false;
+  const block = parseManagedBlock(current, markers);
+  const joined = `${current.slice(0, block.start)}${current.slice(block.end)}`.replace(/\n{3,}/gu, '\n\n');
+  const updated = joined.trim();
+  await atomicWrite(path, updated.length === 0 ? '' : `${updated}\n`);
+  return true;
+}
+
 export async function writeMarkdownDocument(
   path: string,
   frontmatter: Record<string, unknown>,

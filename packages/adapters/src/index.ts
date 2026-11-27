@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, readdir, stat } from 'node:fs/promises';
+import { access, readdir, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { extname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -12,28 +12,138 @@ const execFileAsync = promisify(execFile);
 export const DEFAULT_AGENT_INSTRUCTIONS = [
   '## Taga 长期记忆（taga-mcp）',
   '',
-  '本会话接入了 Taga 本地记忆库（MCP 服务器 `taga`，工具以 `memory_` / `brain_` / `context_` 开头）。**仅当本会话实际能调用这些工具时**才执行以下约定，否则忽略本节。行为约定：',
+  '本会话接入了 Taga 本地记忆库（MCP 服务器 `taga`，工具以 `memory_` / `brain_` / `context_` 开头）。**仅当本会话实际能调用这些工具时**才执行以下约定，否则忽略本节。参数细节见各工具说明。',
   '',
-  '1. **会话开始**：进入一个新任务会话时，调用 `memory_session_start`，传入当前工作目录 `cwd` 和当前任务描述 `task`（一句话概括用户这次要做什么；它是相关性召回的检索词，不传则退化为全量召回）（`session_id` 用 `日期-项目简称` 格式，如 `20261114-taga`）；Taga 会动态识别项目并返回 Context Pack。',
-  '2. **主动记录**：当会话中产生或确认了**可跨会话复用**的经验时，主动调用 `memory_record` 写入。典型场景：',
-  '   - 踩坑与修复方案（报错根因、有效解法）',
-  '   - 用户的偏好与工作习惯（称呼、代码风格、流程偏好）',
-  '   - 项目关键决策与环境配置变更（端口、路径、版本约束）',
-  '   - 验证过的操作步骤（部署、构建、排查流程）',
-  '   类型选择（`type` 参数，五选一）：',
-  '   - `preferences` — 用户偏好与习惯（称呼、代码风格、流程偏好）',
-  '   - `environment` — 环境与配置事实（路径、端口、版本、工具链约束）',
-  '   - `procedures` — 验证过的操作步骤（部署、构建、排查 SOP）',
-  '   - `lessons` — 踩坑与修复经验（报错根因、有效解法、"不要做 X"）',
-  '   - `projects` — 项目决策与目标（方案取舍、里程碑、范围界定）',
-  '   拿不准时选 `lessons`（最常见）；明显关于用户本人的选 `preferences`。',
-  '   参数要求：传入当前 `session_id`，`scope` 通常使用 `"auto"`，`requested_status` 必须显式传 `"draft"`，`actor` 传 `"agent"`，`sources` 至少给出一条来源（file/commit/tool_call）；经验涉及具体文件、符号或提交时，`anchors` 传入对应锚点（`memory_precheck` 依赖锚点召回）。',
-  '   记录前先 `memory_search` 确认没有相近记忆：已存在则改用 `memory_feedback`（kind=conflict）或提示用户审核，不要重复写入。宁缺毋滥——只记可复用的事实；不记一次性细节、中间过程、猜测和通用建议，机密信息一律不进记忆。',
-  '   用户口述大段经验或外部知识时，改用 `knowledge_ingest` 入队蒸馏，不要整段塞进 `memory_record`。',
-  '3. **动手前查询**：遇到"以前怎么解决的"类问题，先 `memory_search` 再动手，避免重复踩坑；检索词可能有中英或用词差异时，传 `alternates` 同义变体（最多 6 个）扩大召回；准备告诉用户"之前没做过 / 没有记录"之前，先 `memory_search` 确认，不要凭印象下结论；要修改某个文件或符号之前，先 `memory_precheck` 传入目标 `file` / `symbol`，检查是否存在相关记忆或流程约束。',
-  '4. **反馈闭环**：Context Pack 中的每条记忆都带 `[memory_id: ...]` 标记，反馈时直接引用该 ID。召回的记忆确实帮到了你，可在会话收尾时对关键记忆调 `memory_feedback`（kind=useful）；发现记忆过时或有误，调 kind=conflict 或 not_useful；确认环境/配置类记忆仍然有效，可调 kind=verified。',
-  '5. **状态说明**：写入的记忆是 draft，用户可通过 `taga review` 审核，或由后台整合（consolidation）自动晋升后才进默认召回；不要向用户声称记忆"已生效"，可以说"已记录待审核"。工具返回 degraded 或 warnings 时（如 FTS 索引不可用），向用户说明并建议运行 `taga reindex`。',
+  '1. **开始任务**：调用 `memory_session_start`，传入当前工作目录 `cwd` 和一句话 `task`（用户这次要做什么，它是召回的检索词）。`session_id` 自拟一个唯一值（如 `日期-项目-随机后缀`），之后的调用沿用。',
+  '2. **需要过去的经验时先查**：`memory_search` 的 `query` 先写一句自然描述；零结果或只有词法结果时，换成空格分隔的关键词、原文里的标识符（命令、错误码、路径）或 `alternates`（最多 6 个同义或中英变体）。换 2 种写法仍无结果，才可以说"没有记录"。一次性的小改动不必查。修改文件或符号之前，先用 `memory_precheck` 传入 `file` / `symbol`，优先看 `anchor_state` 为 valid 的条目。',
+  '3. **产生可复用的经验时记**：先 `memory_search` 确认没有相近记忆，再调用 `memory_record`（`requested_status` 传 `"draft"`，`actor` 传 `"agent"`，传当前 `session_id`，`scope` 用 `"auto"`）；已有相近记忆就改用 `memory_feedback`（kind=conflict 或 not_useful）。`title` 写成自包含的一句话，`body` 带具体标识符，`sources` 至少一条；涉及具体文件或符号时给出 `anchors`（`memory_precheck` 靠它召回）。类型在 `preferences`（偏好）、`environment`（环境）、`procedures`（步骤）、`lessons`（踩坑，拿不准选它）、`projects`（决策）中选。',
+  '4. **宁缺毋滥**：只记可复用的事实，不记一次性细节、中间过程和猜测；机密信息一律不进记忆。新记忆是 draft，经 `taga review` 审核后才进入召回，对用户说"已记录待审核"。用户口述的大段材料改用 `knowledge_ingest` 入队蒸馏。',
+  '5. **任务收尾时反馈**：对确实帮到你的记忆调用 `memory_feedback`（kind=useful），过时或有误的用 conflict 或 not_useful。工具返回 `warnings` 或 `degraded` 时如实转达用户。',
 ].join('\n');
+
+export const MCP_SERVER_NAME = 'taga';
+export const MCP_SERVER_COMMAND = 'taga-mcp';
+
+/** Where an agent reads its stdio MCP server configuration, and how to register taga-mcp there. */
+export interface McpRegistrationGuide {
+  readonly agentId: string;
+  /** Config files that can hold a stdio MCP server entry, best effort. */
+  readonly configPaths: readonly string[];
+  /** The agent reads the project-root `.mcp.json` standard. */
+  readonly supportsMcpJson: boolean;
+  readonly howto: string;
+}
+
+const GENERIC_MCP_HOWTO: Readonly<Record<string, string>> = {
+  pi: 'Pi: add a stdio MCP server named "taga" running the command "taga-mcp" (see the Pi MCP documentation for the config location).',
+  opencode: 'OpenCode: run `opencode mcp add taga -- taga-mcp` (add --global for every project), or add a local MCP server named "taga" with command ["taga-mcp"] to opencode.json.',
+  cursor: 'Cursor: add a stdio server named "taga" with command "taga-mcp" to .cursor/mcp.json.',
+  windsurf: 'Windsurf: add a stdio server named "taga" with command "taga-mcp" to your mcp_config.json.',
+  cline: 'Cline: add a stdio MCP server named "taga" with command "taga-mcp" in the Cline MCP settings.',
+  roo: 'Roo Code: add a stdio MCP server named "taga" with command "taga-mcp" in the Roo Code MCP settings.',
+  local: 'Add a stdio MCP server named "taga" with command "taga-mcp" to your agent\'s MCP configuration.',
+};
+
+export function mcpRegistrationGuide(agentId: string, projectRoot: string, env: NodeJS.ProcessEnv = process.env): McpRegistrationGuide {
+  const home = env.HOME ?? env.USERPROFILE ?? homedir();
+  if (agentId === 'claude-code') {
+    const claudeHome = env.CLAUDE_CONFIG_DIR ?? env.CLAUDE_HOME ?? join(home, '.claude');
+    return {
+      agentId,
+      configPaths: [join(projectRoot, '.mcp.json'), join(claudeHome, '.claude.json')],
+      supportsMcpJson: true,
+      howto: 'Claude Code: run `claude mcp add --scope user taga -- taga-mcp`, or rerun with --register-mcp to write .mcp.json for this project (Claude Code asks once before loading it).',
+    };
+  }
+  if (agentId === 'codex') {
+    // On Windows the npm shim is a .cmd file, which the Codex process can only start through cmd.
+    const windows = process.platform === 'win32';
+    return {
+      agentId,
+      configPaths: [join(env.CODEX_HOME ?? join(home, '.codex'), 'config.toml')],
+      supportsMcpJson: false,
+      howto: [
+        'Codex: run `codex mcp add taga -- taga-mcp`, or add to config.toml:',
+        '  [mcp_servers.taga]',
+        windows ? '  command = "cmd"\n  args = ["/c", "taga-mcp"]' : '  command = "taga-mcp"',
+      ].join('\n'),
+    };
+  }
+  if (agentId === 'opencode') {
+    const configRoot = env.XDG_CONFIG_HOME ?? join(home, '.config');
+    return {
+      agentId,
+      configPaths: [join(projectRoot, 'opencode.json'), join(configRoot, 'opencode', 'opencode.json')],
+      supportsMcpJson: false,
+      howto: GENERIC_MCP_HOWTO[agentId] ?? '',
+    };
+  }
+  return {
+    agentId,
+    configPaths: [],
+    supportsMcpJson: false,
+    howto: GENERIC_MCP_HOWTO[agentId] ?? `Add a stdio MCP server named "${MCP_SERVER_NAME}" with command "${MCP_SERVER_COMMAND}" to your agent's MCP configuration.`,
+  };
+}
+
+/** Whether a config file already starts a stdio MCP server that runs the taga-mcp command. */
+export async function isMcpServerRegistered(guide: McpRegistrationGuide, projectRoot: string): Promise<boolean> {
+  for (const path of guide.configPaths) {
+    const content = await readFileOrEmpty(path);
+    if (content.length === 0) continue;
+    if (path.endsWith('.toml')) {
+      if (/\[mcp_servers\.[^\]]+\][^\]]*?command\s*=\s*"([^"]*taga-mcp)"/u.test(content)) return true;
+      continue;
+    }
+    if (jsonStartsMcpCommand(content, projectRoot)) return true;
+  }
+  return false;
+}
+
+function jsonStartsMcpCommand(content: string, projectRoot: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return false;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return false;
+  const root = parsed as Record<string, unknown>;
+  const project = root.projects;
+  const projectServers = typeof project === 'object' && project !== null
+    ? (project as Record<string, unknown>)[projectRoot]
+    : undefined;
+  // .mcp.json uses mcpServers, OpenCode uses mcp.servers, Claude user config nests under projects.<root>.
+  const servers = [
+    root.mcpServers,
+    typeof root.mcp === 'object' && root.mcp !== null ? (root.mcp as Record<string, unknown>).servers : undefined,
+    typeof projectServers === 'object' && projectServers !== null ? (projectServers as Record<string, unknown>).mcpServers : undefined,
+  ];
+  return servers.some((entries) => typeof entries === 'object' && entries !== null
+    && Object.entries(entries).some(([name, entry]) => runsTagaMcp(name, entry)));
+}
+
+/** Matches the command shapes agents use: a string ("taga-mcp"), an argv array (["taga-mcp"]), or a { command } entry. */
+function runsTagaMcp(name: string, entry: unknown): boolean {
+  const head = (value: unknown): unknown => Array.isArray(value) ? (value as readonly unknown[])[0] : value;
+  const command = head(typeof entry === 'string' || Array.isArray(entry)
+    ? entry
+    : typeof entry === 'object' && entry !== null
+      ? (entry as Record<string, unknown>).command
+      : undefined);
+  const basename = typeof command === 'string'
+    ? command.replaceAll('\\', '/').split('/').at(-1)?.replace(/\.(cmd|exe|ps1|bat)$/u, '')
+    : undefined;
+  return name === MCP_SERVER_NAME || basename === MCP_SERVER_COMMAND;
+}
+
+async function readFileOrEmpty(path: string): Promise<string> {
+  try {
+    return await readFile(path, 'utf8');
+  } catch {
+    return '';
+  }
+}
 
 export interface SourceCursor {
   readonly offset: number;

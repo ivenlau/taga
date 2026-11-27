@@ -6,6 +6,8 @@ import {
   AgentAdapterRegistry,
   ClaudeCodeAgentAdapter,
   CodexAgentAdapter,
+  isMcpServerRegistered,
+  mcpRegistrationGuide,
   OpenCodeAgentAdapter,
   OpenCodeSqliteSourceAdapter,
   PiAgentAdapter,
@@ -123,3 +125,67 @@ function createOpenCodeDatabase(path: string): void {
     .run('message-1', 'session-1', 'user', Date.parse(timestamp), Date.parse(timestamp), JSON.stringify({ role: 'user', text: 'verified opencode session' }), 1);
   database.close();
 }
+
+describe('MCP registration guide', () => {
+  it('points Claude Code and Codex at their config files with the exact registration', () => {
+    const claude = mcpRegistrationGuide('claude-code', '/work/app', { ...process.env, CLAUDE_CONFIG_DIR: '/home/u/.claude' });
+    expect(claude.configPaths).toEqual(['/work/app/.mcp.json', '/home/u/.claude/.claude.json']);
+    expect(claude.supportsMcpJson).toBe(true);
+    expect(claude.howto).toContain('claude mcp add');
+
+    const codex = mcpRegistrationGuide('codex', '/work/app', { ...process.env, CODEX_HOME: '/home/u/.codex' });
+    expect(codex.configPaths).toEqual(['/home/u/.codex/config.toml']);
+    expect(codex.supportsMcpJson).toBe(false);
+    expect(codex.howto).toContain('[mcp_servers.taga]');
+
+    const pi = mcpRegistrationGuide('pi', '/work/app');
+    expect(pi.configPaths).toEqual([]);
+    expect(pi.supportsMcpJson).toBe(false);
+    expect(pi.howto).toContain('taga-mcp');
+
+    const opencode = mcpRegistrationGuide('opencode', '/work/app', { ...process.env, XDG_CONFIG_HOME: '/home/u/.config' });
+    expect(opencode.configPaths).toEqual(['/work/app/opencode.json', '/home/u/.config/opencode/opencode.json']);
+    expect(opencode.howto).toContain('opencode mcp add taga');
+  });
+
+  it('detects an existing taga server in JSON and TOML configs', async () => {
+    const fixture = await createTemporaryDirectory();
+    const project = join(fixture.path, 'app');
+    await mkdir(project, { recursive: true });
+    try {
+      const claude = mcpRegistrationGuide('claude-code', project, { ...process.env, CLAUDE_CONFIG_DIR: join(fixture.path, 'claude') });
+      expect(await isMcpServerRegistered(claude, project)).toBe(false);
+
+      const mcpJson = join(project, '.mcp.json');
+      await writeFile(mcpJson, JSON.stringify({ mcpServers: { other: { command: 'other' } } }), 'utf8');
+      expect(await isMcpServerRegistered(claude, project)).toBe(false);
+      await writeFile(mcpJson, JSON.stringify({ mcpServers: { taga: { type: 'stdio', command: 'taga-mcp' } } }), 'utf8');
+      expect(await isMcpServerRegistered(claude, project)).toBe(true);
+
+      // A user-scope registration counts as well, whatever the entry is called.
+      await writeFile(mcpJson, '{}', 'utf8');
+      await mkdir(join(fixture.path, 'claude'), { recursive: true });
+      await writeFile(join(fixture.path, 'claude', '.claude.json'), JSON.stringify({ projects: { [project]: { mcpServers: { memory: { command: 'C:\\tools\\taga-mcp.cmd' } } } } }), 'utf8');
+      expect(await isMcpServerRegistered(claude, project)).toBe(true);
+
+      // OpenCode's own `mcp add` writes mcp.servers with an argv-style command; both count as registered.
+      const opencode = mcpRegistrationGuide('opencode', project, { ...process.env, XDG_CONFIG_HOME: join(fixture.path, 'xdg') });
+      const opencodeConfig = join(project, 'opencode.json');
+      await writeFile(opencodeConfig, JSON.stringify({ $schema: 'x', mcp: { servers: { taga: { type: 'local', command: ['taga-mcp'] } } } }), 'utf8');
+      expect(await isMcpServerRegistered(opencode, project)).toBe(true);
+      await writeFile(opencodeConfig, JSON.stringify({ mcp: { servers: { other: { type: 'local', command: ['other'] } } } }), 'utf8');
+      expect(await isMcpServerRegistered(opencode, project)).toBe(false);
+
+      const codex = mcpRegistrationGuide('codex', project, { ...process.env, CODEX_HOME: join(fixture.path, 'codex') });
+      expect(await isMcpServerRegistered(codex, project)).toBe(false);
+      await mkdir(join(fixture.path, 'codex'), { recursive: true });
+      const configToml = join(fixture.path, 'codex', 'config.toml');
+      await writeFile(configToml, 'model = "x"\n\n[mcp_servers.other]\ncommand = "other"\n', 'utf8');
+      expect(await isMcpServerRegistered(codex, project)).toBe(false);
+      await writeFile(configToml, 'model = "x"\n\n[mcp_servers.taga]\ncommand = "taga-mcp"\n', 'utf8');
+      expect(await isMcpServerRegistered(codex, project)).toBe(true);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
