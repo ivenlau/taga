@@ -3,6 +3,11 @@ import { readFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, posix, resolve, win32 } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
+import {
+  DEFAULT_LLM_CONSUMER_SHARE,
+  DEFAULT_LLM_DAILY_CALLS,
+  DEFAULT_LLM_DAILY_TOKENS,
+} from '../../application/src/llm.js';
 
 export type FeatureMode = 'off' | 'shadow' | 'on';
 export type ConfigSource = 'override' | 'environment' | 'file' | 'default';
@@ -48,6 +53,8 @@ const llmFileSchema = z.object({
   model: nonEmptyString.optional(),
   timeoutMs: z.number().int().positive().optional(),
   dailyCap: z.number().int().positive().optional(),
+  dailyTokens: z.number().int().positive().optional(),
+  perConsumerShare: z.number().min(0).max(1).optional(),
 }).strict();
 
 const promotionFileSchema = z.object({
@@ -69,6 +76,10 @@ const consolidationFileSchema = z.object({
 
 const learningFileSchema = z.object({
   allowNetwork: z.boolean().optional(),
+}).strict();
+
+const collectionFileSchema = z.object({
+  lookbackDays: z.number().int().positive().optional(),
 }).strict();
 
 const reflectionFileSchema = z.object({
@@ -101,6 +112,7 @@ export const configFileV4Schema = z.object({
   llm: llmFileSchema.optional(),
   consolidation: consolidationFileSchema.optional(),
   learning: learningFileSchema.optional(),
+  collection: collectionFileSchema.optional(),
   reflection: reflectionFileSchema.optional(),
 }).strict();
 
@@ -122,6 +134,8 @@ const legacyLlmSchema = z.object({
   timeoutMs: z.number().int().positive().optional(),
   providerName: nonEmptyString.optional(),
   dailyCap: z.number().int().positive().optional(),
+  dailyTokens: z.number().int().positive().optional(),
+  perConsumerShare: z.number().min(0).max(1).optional(),
 }).passthrough();
 
 const legacyConfigSchema = z.object({
@@ -184,6 +198,8 @@ export interface ResolvedConfig {
     readonly model: string;
     readonly timeoutMs: number;
     readonly dailyCap?: number;
+    readonly dailyTokens?: number;
+    readonly perConsumerShare?: number;
     readonly apiKey?: string;
   };
   readonly consolidation: {
@@ -201,6 +217,10 @@ export interface ResolvedConfig {
   readonly learning: {
     readonly allowNetwork: boolean;
   };
+  readonly collection: {
+    /** Records older than this many days are skipped by ingestion (cursor still advances). */
+    readonly lookbackDays: number;
+  };
   readonly reflection: {
     readonly enabled: boolean;
     readonly intervalMs: number;
@@ -217,7 +237,7 @@ export interface ConfigOverrides {
   readonly retrieval?: {
     readonly semantic?: { readonly mode?: FeatureMode; readonly modelPath?: string };
   };
-  readonly llm?: { readonly mode?: FeatureMode; readonly provider?: string; readonly endpoint?: string; readonly model?: string; readonly timeoutMs?: number; readonly dailyCap?: number };
+  readonly llm?: { readonly mode?: FeatureMode; readonly provider?: string; readonly endpoint?: string; readonly model?: string; readonly timeoutMs?: number; readonly dailyCap?: number; readonly dailyTokens?: number; readonly perConsumerShare?: number };
   readonly consolidation?: {
     readonly enabled?: boolean;
     readonly scanIntervalMs?: number;
@@ -225,6 +245,7 @@ export interface ConfigOverrides {
     readonly deduplication?: { readonly rejectSimilarity?: number; readonly mergeSimilarity?: number };
   };
   readonly learning?: { readonly allowNetwork?: boolean };
+  readonly collection?: { readonly lookbackDays?: number };
   readonly reflection?: { readonly enabled?: boolean; readonly intervalMs?: number; readonly windowDays?: number; readonly minGroupSize?: number; readonly maxGroups?: number };
 }
 
@@ -346,6 +367,8 @@ export function migrateLegacyConfig(legacy: z.infer<typeof legacyConfigSchema>):
           ...(legacyLlm.model === undefined ? {} : { model: legacyLlm.model }),
           ...(legacyLlm.timeoutMs === undefined ? {} : { timeoutMs: legacyLlm.timeoutMs }),
           ...(legacyLlm.dailyCap === undefined ? {} : { dailyCap: legacyLlm.dailyCap }),
+          ...(legacyLlm.dailyTokens === undefined ? {} : { dailyTokens: legacyLlm.dailyTokens }),
+          ...(legacyLlm.perConsumerShare === undefined ? {} : { perConsumerShare: legacyLlm.perConsumerShare }),
         },
       }),
       ...(legacy.consolidation === undefined ? {} : {
@@ -414,6 +437,7 @@ export function configFileFromResolved(config: ResolvedConfig): ConfigFileV4 {
       deduplication: { ...config.consolidation.deduplication },
     },
     learning: { allowNetwork: config.learning.allowNetwork },
+    collection: { lookbackDays: config.collection.lookbackDays },
     reflection: { ...config.reflection },
   };
 }
@@ -432,6 +456,8 @@ export function redactedConfig(config: ResolvedConfig): Omit<ResolvedConfig, 'll
       model: config.llm.model,
       timeoutMs: config.llm.timeoutMs,
       ...(config.llm.dailyCap === undefined ? {} : { dailyCap: config.llm.dailyCap }),
+      ...(config.llm.dailyTokens === undefined ? {} : { dailyTokens: config.llm.dailyTokens }),
+      ...(config.llm.perConsumerShare === undefined ? {} : { perConsumerShare: config.llm.perConsumerShare }),
       ...(config.llm.apiKey === undefined ? {} : { apiKey: '[redacted]' }),
     },
   };
@@ -457,7 +483,17 @@ export function createDefaultConfig(cwd: string = resolve(process.cwd()), brain:
     retrieval: {
       semantic: { mode: 'off', modelPath: '' },
     },
-    llm: { mode: 'off', provider: 'openai-compatible', endpoint: '', model: '', timeoutMs: 30_000 },
+    llm: {
+      mode: 'off',
+      provider: 'openai-compatible',
+      endpoint: '',
+      model: '',
+      timeoutMs: 30_000,
+      // Safe-by-default budget limits (single source of truth: application/llm.ts).
+      dailyCap: DEFAULT_LLM_DAILY_CALLS,
+      dailyTokens: DEFAULT_LLM_DAILY_TOKENS,
+      perConsumerShare: DEFAULT_LLM_CONSUMER_SHARE,
+    },
     consolidation: {
       enabled: false,
       scanIntervalMs: 600_000,
@@ -465,6 +501,7 @@ export function createDefaultConfig(cwd: string = resolve(process.cwd()), brain:
       deduplication: { rejectSimilarity: 0.95, mergeSimilarity: 0.88 },
     },
     learning: { allowNetwork: false },
+    collection: { lookbackDays: 7 },
     reflection: { enabled: false, intervalMs: 7 * 24 * 60 * 60 * 1000, windowDays: 7, minGroupSize: 3, maxGroups: 5 },
   };
 }
@@ -479,7 +516,9 @@ function resolveLayers(defaults: ResolvedConfig, file: ConfigFileV4 | null, env:
     return defaultValue;
   };
   const brain = resolveLayeredPath('paths.brain', pick('paths.brain', overrides.paths?.brain, optionalString(env, 'TAGA_BRAIN'), file?.paths?.brain, defaults.paths.brain), sources, cwd, fileBase);
-  const dailyCap = pick('llm.dailyCap', overrides.llm?.dailyCap, optionalPositiveInt(env, 'TAGA_LLM_DAILY_CAP'), file?.llm?.dailyCap, 0);
+  const dailyCap = pick('llm.dailyCap', overrides.llm?.dailyCap, optionalPositiveInt(env, 'TAGA_LLM_DAILY_CAP'), file?.llm?.dailyCap, defaults.llm.dailyCap ?? DEFAULT_LLM_DAILY_CALLS);
+  const dailyTokens = pick('llm.dailyTokens', overrides.llm?.dailyTokens, optionalPositiveInt(env, 'TAGA_LLM_DAILY_TOKENS'), file?.llm?.dailyTokens, defaults.llm.dailyTokens ?? DEFAULT_LLM_DAILY_TOKENS);
+  const perConsumerShare = pick('llm.perConsumerShare', overrides.llm?.perConsumerShare, optionalUnitInterval(env, 'TAGA_LLM_PER_CONSUMER_SHARE'), file?.llm?.perConsumerShare, defaults.llm.perConsumerShare ?? DEFAULT_LLM_CONSUMER_SHARE);
   const apiKey = optionalSecret(env, 'TAGA_LLM_API_KEY');
   if (apiKey !== undefined) sources['llm.apiKey'] = 'environment';
   const config: ResolvedConfig = {
@@ -509,6 +548,8 @@ function resolveLayers(defaults: ResolvedConfig, file: ConfigFileV4 | null, env:
       model: pick('llm.model', overrides.llm?.model, optionalString(env, 'TAGA_LLM_MODEL'), file?.llm?.model, defaults.llm.model),
       timeoutMs: pick('llm.timeoutMs', overrides.llm?.timeoutMs, optionalPositiveInt(env, 'TAGA_LLM_TIMEOUT_MS'), file?.llm?.timeoutMs, defaults.llm.timeoutMs),
       ...(dailyCap > 0 ? { dailyCap } : {}),
+      ...(dailyTokens > 0 ? { dailyTokens } : {}),
+      ...(perConsumerShare >= 0 && perConsumerShare <= 1 ? { perConsumerShare } : {}),
       ...(apiKey === undefined ? {} : { apiKey }),
     },
     consolidation: {
@@ -525,6 +566,9 @@ function resolveLayers(defaults: ResolvedConfig, file: ConfigFileV4 | null, env:
     },
     learning: {
       allowNetwork: pick('learning.allowNetwork', overrides.learning?.allowNetwork, optionalBoolean(env, 'TAGA_LEARN_ALLOW_NETWORK'), file?.learning?.allowNetwork, defaults.learning.allowNetwork),
+    },
+    collection: {
+      lookbackDays: pick('collection.lookbackDays', overrides.collection?.lookbackDays, optionalPositiveInt(env, 'TAGA_COLLECTION_LOOKBACK_DAYS'), file?.collection?.lookbackDays, defaults.collection.lookbackDays),
     },
     reflection: {
       enabled: pick('reflection.enabled', overrides.reflection?.enabled, optionalOnOff(env, 'TAGA_REFLECT_MODE'), file?.reflection?.enabled, defaults.reflection.enabled),

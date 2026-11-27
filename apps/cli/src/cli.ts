@@ -7,8 +7,10 @@ import {
   DEFAULT_PROACTIVE_POLICY,
   GovernanceService,
   SqliteAuditLog,
+  llmConfigFromResolved,
   type LifecycleActor,
 } from '../../../packages/application/src/index.js';
+import { PolishService, createLlmProvider, metadataLlmBudgetState, withLlmBudget, type CandidatePolisher } from '../../../packages/distillation/src/index.js';
 import {
   ConfigurationError,
   configDirectory,
@@ -1455,6 +1457,17 @@ function isSourceRefKind(value: string): value is SourceRef['kind'] {
   return ['file', 'line', 'symbol', 'url', 'commit', 'test', 'tool_call'].includes(value);
 }
 
+function cliPolisher(context: CliContext, database: DatabaseStore): CandidatePolisher | undefined {
+  const llm = llmConfigFromResolved(context.config.llm);
+  const provider = llm.mode === 'on' ? createLlmProvider(llm) : undefined;
+  if (provider === undefined) return undefined;
+  return new PolishService(withLlmBudget(provider, {
+    ...(llm.dailyCap === undefined ? {} : { dailyCalls: llm.dailyCap }),
+    ...(llm.dailyTokens === undefined ? {} : { dailyTokens: llm.dailyTokens }),
+    ...(llm.perConsumerShare === undefined ? {} : { perConsumerShare: llm.perConsumerShare }),
+  }, 'polish', metadataLlmBudgetState(database)), llm.model, llm.timeoutMs);
+}
+
 async function reviewCommand(subcommand: string | undefined, positionals: readonly string[], context: CliContext): Promise<CliResponse> {
   const repository = new MarkdownMemoryRepository(context.brainPath);
   const memories = await repository.list();
@@ -1504,7 +1517,7 @@ async function reviewCommand(subcommand: string | undefined, positionals: readon
     const candidate = database.getCandidate(id);
     const updated = candidate === null
       ? await new GovernanceService(repository, audit).transition(id, { type: 'activate' }, { actor: 'user' }, 'review accept from CLI')
-      : await new ReviewService(new DatabaseCandidateRepository(database), repository, audit).accept(id, { actor: 'user' }, 'review candidate accept from CLI');
+      : await new ReviewService(new DatabaseCandidateRepository(database), repository, audit, undefined, cliPolisher(context, database)).accept(id, { actor: 'user' }, 'review candidate accept from CLI');
     const body = await readMemoryBody(context.brainPath, updated);
     new FtsRetrievalProvider(database).upsert(updated, body);
     enqueueSemanticUpsert(database, updated.id, updated.contentHash);
@@ -1620,6 +1633,7 @@ async function learnCommand(context: CliContext): Promise<CliResponse> {
     }, {
       brainPath: context.brainPath,
       semantic: { modelPath: context.config.retrieval.semantic.modelPath },
+      llm: llmConfigFromResolved(context.config.llm),
       ...(intervalMs === undefined ? {} : { intervalMs }),
       ...(maxCycles === undefined ? {} : { maxCycles }),
       signal: controller.signal,
@@ -1643,6 +1657,7 @@ async function learnCommand(context: CliContext): Promise<CliResponse> {
   }, {
     brainPath: context.brainPath,
     semantic: { modelPath: context.config.retrieval.semantic.modelPath },
+    llm: llmConfigFromResolved(context.config.llm),
     ...(maxBlocks === undefined ? {} : { maxBlocks }),
   });
   return { ok: true, code: 'LEARN_COMPLETED', message: 'learn run completed', data: report };

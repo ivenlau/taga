@@ -17,12 +17,17 @@ import {
   type Candidate,
   type EvidenceEvent,
   type Memory,
-  type MemoryType,
   type Observation,
 } from '../../domain/src/index.js';
 import { z } from 'zod';
 import type { DatabaseStore } from '../../storage/src/index.js';
 import type { NotificationService } from '../../notifications/src/index.js';
+import { classifySegment, extractProseSummary, memoryTypeForObservation, type EvidenceSignal } from './mining.js';
+import type { CandidatePolisher, PolishResult } from './polish.js';
+
+export * from './mining.js';
+export * from './polish.js';
+export * from './adjudicate.js';
 
 export interface DistillationInput {
   readonly observation: Observation;
@@ -70,7 +75,18 @@ export interface DistillationFallbackEvent {
   readonly provider: string;
   readonly model: string;
   readonly reason: string;
+  readonly errorKind?: string;
   readonly evidenceIds: readonly string[];
+}
+
+/** Failure taxonomy for LLM calls: only 'other' is retry-ambiguous; the rest never warrant retries. */
+export function classifyLlmError(message: string): 'rate-limit' | 'quota' | 'auth' | 'timeout' | 'output' | 'other' {
+  if (/\b429\b|rate.?limit|too many requests/iu.test(message)) return 'rate-limit';
+  if (/\b402\b|quota|billing|insufficient/iu.test(message)) return 'quota';
+  if (/\b401\b|\b403\b|unauthor|forbidden|api key/iu.test(message)) return 'auth';
+  if (/timeout|aborted/iu.test(message)) return 'timeout';
+  if (/json|schema|invalid|unsupported evidence|did not contain/iu.test(message)) return 'output';
+  return 'other';
 }
 
 const llmDraftSchema = z.object({
@@ -208,25 +224,143 @@ export function createLlmProvider(config: { readonly mode: 'off' | 'shadow' | 'o
   });
 }
 
+/** Persisted daily usage so the cap survives wrapper/chain recreation (e.g. one chain per job). */
+export interface DailyCapState {
+  load(day: string): number;
+  save(day: string, count: number): void;
+}
+
 export function withDailyCap(
   provider: StructuredCompletionProvider,
   cap: number,
   clock: () => Date = () => new Date(),
+  state?: DailyCapState,
 ): StructuredCompletionProvider {
   let day = clock().toISOString().slice(0, 10);
-  let count = 0;
+  let count = state?.load(day) ?? 0;
   return {
     complete: (request: StructuredCompletionRequest): Promise<StructuredCompletionResponse> => {
       const today = clock().toISOString().slice(0, 10);
       if (today !== day) {
         day = today;
-        count = 0;
+        count = state?.load(day) ?? 0;
       }
       if (count >= cap) {
         return Promise.reject(new Error(`llm daily cap reached (${cap} calls on ${day})`));
       }
       count += 1;
+      state?.save(day, count);
       return provider.complete(request);
+    },
+  };
+}
+
+export interface LlmConsumerUsage {
+  calls: number;
+  tokens: number;
+}
+
+/** Per-day usage record; `consumers` buckets by chain consumer (distill/learn/reflect/consolidation). */
+export interface LlmBudgetUsage {
+  calls: number;
+  tokens: number;
+  consumers: Record<string, LlmConsumerUsage>;
+  warned?: boolean;
+}
+
+export interface LlmBudgetConfig {
+  readonly dailyCalls?: number;
+  readonly dailyTokens?: number;
+  /** Share of the daily budget a single consumer may use; 1 disables the split. */
+  readonly perConsumerShare?: number;
+}
+
+export interface LlmBudgetState {
+  load(day: string): LlmBudgetUsage | null;
+  save(day: string, usage: LlmBudgetUsage): void;
+}
+
+export function estimateRequestTokens(request: StructuredCompletionRequest): number {
+  return Math.ceil((request.system.length + request.user.length) / 4);
+}
+
+function emptyBudgetUsage(): LlmBudgetUsage {
+  return { calls: 0, tokens: 0, consumers: {} };
+}
+
+/**
+ * Choke-point LLM budget gate: enforces daily calls, daily tokens (actual usage when the
+ * provider reports it, request estimate otherwise) and a per-consumer share. Beyond the
+ * budget the call rejects so callers fail over to deterministic paths.
+ */
+export function withLlmBudget(
+  provider: StructuredCompletionProvider,
+  config: LlmBudgetConfig,
+  consumer = 'default',
+  state?: LlmBudgetState,
+  clock: () => Date = () => new Date(),
+): StructuredCompletionProvider {
+  let day = clock().toISOString().slice(0, 10);
+  let usage: LlmBudgetUsage = state?.load(day) ?? emptyBudgetUsage();
+  return {
+    complete: (request: StructuredCompletionRequest): Promise<StructuredCompletionResponse> => {
+      const today = clock().toISOString().slice(0, 10);
+      if (today !== day) {
+        day = today;
+        usage = state?.load(day) ?? emptyBudgetUsage();
+      }
+      const estimate = estimateRequestTokens(request);
+      const mine = usage.consumers[consumer] ?? { calls: 0, tokens: 0 };
+      const share = config.perConsumerShare ?? 1;
+      const consumerCallLimit = config.dailyCalls === undefined ? undefined : Math.floor(config.dailyCalls * share);
+      const consumerTokenLimit = config.dailyTokens === undefined ? undefined : Math.floor(config.dailyTokens * share);
+      if (config.dailyCalls !== undefined && usage.calls >= config.dailyCalls) {
+        return Promise.reject(new Error(`llm daily cap reached (${config.dailyCalls} calls on ${day})`));
+      }
+      if (config.dailyTokens !== undefined && usage.tokens + estimate > config.dailyTokens) {
+        return Promise.reject(new Error(`llm daily token budget reached (${config.dailyTokens} tokens on ${day})`));
+      }
+      if (share < 1 && consumerCallLimit !== undefined && mine.calls >= consumerCallLimit) {
+        return Promise.reject(new Error(`llm consumer budget reached (${consumer} ${consumerCallLimit} calls on ${day})`));
+      }
+      if (share < 1 && consumerTokenLimit !== undefined && mine.tokens + estimate > consumerTokenLimit) {
+        return Promise.reject(new Error(`llm consumer budget reached (${consumer} ${consumerTokenLimit} tokens on ${day})`));
+      }
+      return provider.complete(request).then((response) => {
+        const tokens = (response.inputTokens ?? 0) + (response.outputTokens ?? 0) || estimate;
+        usage = {
+          calls: usage.calls + 1,
+          tokens: usage.tokens + tokens,
+          consumers: { ...usage.consumers, [consumer]: { calls: mine.calls + 1, tokens: mine.tokens + tokens } },
+          ...(usage.warned === undefined ? {} : { warned: usage.warned }),
+        };
+        state?.save(day, usage);
+        return response;
+      });
+    },
+  };
+}
+
+export function metadataLlmBudgetState(database: DatabaseStore): LlmBudgetState {
+  return {
+    load: (day: string): LlmBudgetUsage | null => {
+      const raw = database.getMetadata(`llm-budget:${day}`);
+      if (raw === null) return null;
+      try {
+        const parsed = JSON.parse(raw) as Partial<LlmBudgetUsage>;
+        if (typeof parsed !== 'object' || parsed === null) return null;
+        return {
+          calls: typeof parsed.calls === 'number' ? parsed.calls : 0,
+          tokens: typeof parsed.tokens === 'number' ? parsed.tokens : 0,
+          consumers: typeof parsed.consumers === 'object' && parsed.consumers !== null ? parsed.consumers : {},
+          ...(parsed.warned === undefined ? {} : { warned: parsed.warned }),
+        };
+      } catch {
+        return null;
+      }
+    },
+    save: (day: string, usage: LlmBudgetUsage): void => {
+      database.upsertMetadata(`llm-budget:${day}`, JSON.stringify(usage));
     },
   };
 }
@@ -255,7 +389,7 @@ export class FallbackDistiller implements Distiller {
       return await this.primary.distill(input);
     } catch (error) {
       const reason = error instanceof Error ? error.message : 'provider-failed';
-      this.onFallback?.({ provider: 'primary', model: 'configured', reason, evidenceIds: input.evidence.map((event) => event.id) });
+      this.onFallback?.({ provider: 'primary', model: 'configured', reason, errorKind: classifyLlmError(reason), evidenceIds: input.evidence.map((event) => event.id) });
       const fallback = await this.fallback.distill(input);
       return parseCandidate({
         ...fallback,
@@ -434,6 +568,7 @@ export interface AutomaticDistillationOptions {
   readonly memories?: MemoryRepository;
   readonly notifications?: NotificationService;
   readonly duplicateGate?: (candidate: Candidate) => Promise<SemanticDuplicateVerdict | undefined>;
+  readonly polisher?: CandidatePolisher;
 }
 
 export interface AutomaticDistillationReport {
@@ -457,12 +592,17 @@ export class AutomaticDistillationService {
     this.clock = options.clock ?? (() => new Date());
   }
 
-  async run(input: { readonly projectId?: string; readonly sessionId?: string } = {}): Promise<AutomaticDistillationReport> {
+  async run(input: { readonly projectId?: string; readonly sessionId?: string; readonly eventIds?: readonly string[] } = {}): Promise<AutomaticDistillationReport> {
     const policy = new ProactivePolicyService(this.options.audit ?? new NoopAuditLog(), this.options.policy ?? DEFAULT_PROACTIVE_POLICY, this.clock);
     const policyDecision = await policy.decide({ action: 'distill', subjectType: 'distillation_run', subjectId: `${input.projectId ?? 'all'}:${input.sessionId ?? 'all'}` });
     if (!policyDecision.allowed) return { segments: 0, candidates: 0, duplicates: 0, rejected: 0, activated: 0, reasons: [policyDecision.reason] };
 
-    const evidence = this.database.listEvidence().filter((event) =>
+    const scoped = input.eventIds === undefined
+      ? this.database.listEvidence()
+      : input.eventIds
+        .map((id) => this.database.getEvidence(id))
+        .filter((event): event is EvidenceEvent => event !== null);
+    const evidence = scoped.filter((event) =>
       (input.projectId === undefined || event.projectId === input.projectId) &&
       (input.sessionId === undefined || event.sessionId === input.sessionId),
     );
@@ -472,34 +612,28 @@ export class AutomaticDistillationService {
     let rejected = 0;
     let activated = 0;
     const reasons: string[] = [];
-    for (const segment of groups) {
-      const observation = buildObservation(segment, this.clock);
-      if (!observation.verified) {
-        rejected += 1;
-        reasons.push(`${observation.observation.id}:verification-required`);
-        await this.recordDecision('distillation.rejected', observation.observation.id, 'verification-required', { evidenceIds: observation.observation.evidenceIds });
-        continue;
-      }
-      this.database.saveObservation(observation.observation);
+    let knownMemories = this.options.memories === undefined ? null : await this.options.memories.list();
+    const processed = new Set(this.database.listObservations().map((item) => item.id));
+    const distillSegment = async (segment: readonly EvidenceEvent[], observation: Observation): Promise<void> => {
       const service = new DistillationService(this.provider, this.candidates);
-      const candidate = await service.createCandidate({ observation: observation.observation, evidence: segment, verified: true });
+      const candidate = await service.createCandidate({ observation, evidence: segment, verified: true });
       if (candidate === null) {
         rejected += 1;
-        reasons.push(`${observation.observation.id}:value-gate-rejected`);
-        await this.recordDecision('distillation.rejected', observation.observation.id, 'value-gate-rejected', { evidenceIds: observation.observation.evidenceIds });
-        continue;
+        reasons.push(`${observation.id}:value-gate-rejected`);
+        await this.recordDecision('distillation.rejected', observation.id, 'value-gate-rejected', { evidenceIds: observation.evidenceIds });
+        return;
       }
       const proposed = { ...candidate, decisionReason: 'candidate-created' };
       this.candidates.save(proposed);
-      const matchingMemory = this.options.memories === undefined
+      const matchingMemory = knownMemories === null
         ? null
-        : (await this.options.memories.list()).find((memory) => memory.status !== 'forgotten' && memory.type === proposed.memoryType && memory.summary === proposed.summary);
+        : knownMemories.find((memory) => memory.status !== 'forgotten' && memory.type === proposed.memoryType && memory.summary === proposed.summary);
       if (matchingMemory !== undefined && matchingMemory !== null) {
         this.candidates.save({ ...proposed, decisionReason: 'duplicate-memory', duplicateOf: matchingMemory.id });
         duplicates += 1;
         reasons.push(`${proposed.id}:duplicate-memory:${matchingMemory.id}`);
         await this.recordDecision('distillation.duplicate', proposed.id, 'duplicate-memory', { duplicateOf: matchingMemory.id });
-        continue;
+        return;
       }
       const gate = this.options.duplicateGate === undefined ? undefined : await this.options.duplicateGate(proposed);
       if (gate !== undefined && gate.duplicate) {
@@ -507,7 +641,7 @@ export class AutomaticDistillationService {
         duplicates += 1;
         reasons.push(`${proposed.id}:semantic-duplicate:${gate.duplicateOf ?? 'unknown'}`);
         await this.recordDecision('distillation.semantic_duplicate', proposed.id, 'semantic-duplicate', { ...(gate.duplicateOf === undefined ? {} : { duplicateOf: gate.duplicateOf }), ...(gate.score === undefined ? {} : { score: gate.score }) });
-        continue;
+        return;
       }
       candidates += 1;
       await this.recordDecision('distillation.candidate_created', proposed.id, 'candidate-created', { memoryType: proposed.memoryType, scope: proposed.scopeSuggestion, confidence: proposed.confidence });
@@ -526,10 +660,24 @@ export class AutomaticDistillationService {
       if (proposed.memoryType === 'lessons' && this.options.audit !== undefined && this.options.memories !== undefined) {
         const activation = await policy.decide({ action: 'activate', subjectType: 'candidate', subjectId: proposed.id, memoryType: proposed.memoryType, confidence: proposed.confidence, evidenceGatePassed: true, scope: proposed.scopeSuggestion });
         if (activation.allowed) {
-          await new ReviewService(this.candidates, this.options.memories, this.options.audit, this.clock).accept(proposed.id, { actor: 'daemon' }, activation.reason);
+          await new ReviewService(this.candidates, this.options.memories, this.options.audit, this.clock, this.options.polisher).accept(proposed.id, { actor: 'daemon' }, activation.reason);
           activated += 1;
+          knownMemories = await this.options.memories.list();
         }
       }
+    };
+    for (const segment of groups) {
+      const observation = buildObservation(segment, this.clock);
+      if (!observation.verified) {
+        rejected += 1;
+        reasons.push(`${observation.observation.id}:verification-required`);
+        await this.recordDecision('distillation.rejected', observation.observation.id, 'verification-required', { evidenceIds: observation.observation.evidenceIds });
+        continue;
+      }
+      if (processed.has(observation.observation.id)) continue;
+      await distillSegment(segment, observation.observation);
+      this.database.saveObservation(observation.observation);
+      processed.add(observation.observation.id);
     }
     return { segments: groups.length, candidates, duplicates, rejected, activated, reasons };
   }
@@ -554,6 +702,7 @@ export class ReviewService {
     private readonly memories: MemoryRepository,
     private readonly audit: AuditLog,
     private readonly clock: () => Date = () => new Date(),
+    private readonly polisher?: CandidatePolisher,
   ) {}
 
   list(): Candidate[] {
@@ -581,6 +730,11 @@ export class ReviewService {
   async accept(id: string, actor: LifecycleActor, reason: string): Promise<Memory> {
     const candidate = this.require(id);
     const now = this.clock().toISOString();
+    // L2 polish: one bounded quality pass on accepted deterministic drafts; any failure keeps the draft.
+    const polish: PolishResult | null = this.polisher !== undefined && candidate.model?.mode === 'deterministic'
+      ? await this.polisher.polish(candidate)
+      : null;
+    const polished = polish !== null && polish.polished;
     const memory = parseMemory({
       schemaVersion: 1,
       id: `memory-${randomUUID()}`,
@@ -588,9 +742,9 @@ export class ReviewService {
       scope: candidate.scopeSuggestion,
       projectId: candidate.scopeSuggestion.kind === 'project' ? candidate.scopeSuggestion.id : null,
       status: 'active',
-      title: candidate.title,
-      summary: candidate.summary,
-      confidence: candidate.confidence,
+      title: polished ? polish.title : candidate.title,
+      summary: polished ? polish.summary : candidate.summary,
+      confidence: polished && polish.confidence !== undefined ? polish.confidence : candidate.confidence,
       sourceTrust: 'observed',
       visibility: 'private',
       created: now,
@@ -639,10 +793,8 @@ export class ReviewService {
 export function evaluateGate(input: DistillationInput): DistillationGate {
   const reasons: string[] = [];
   if (input.evidence.length === 0 || input.observation.evidenceIds.length === 0) reasons.push('source-required');
-  if (input.observation.evidenceQuality < 0.6) reasons.push('evidence-quality-below-threshold');
-  if (input.observation.reuse < 0.55) reasons.push('reuse-below-threshold');
-  if (input.observation.sensitivityRisk >= 0.2) reasons.push('sensitivity-risk-too-high');
-  if (!input.observation.novelty) reasons.push('no-novelty');
+  const signal = segmentSignal(input.evidence);
+  if (signal.kind !== 'outcome' && signal.kind !== 'fact') reasons.push('no-outcome-signal');
   if (input.evidence.some((event) => event.sensitivity === 'blocked')) reasons.push('blocked-evidence');
   if (input.verified === false) reasons.push('verification-required');
   return { accepted: reasons.length === 0, reasons };
@@ -661,8 +813,8 @@ function groupEvidence(evidence: readonly EvidenceEvent[]): EvidenceEvent[][] {
 
 function buildObservation(evidence: readonly EvidenceEvent[], clock: () => Date): { readonly observation: Observation; readonly verified: boolean } {
   const text = evidence.map((event) => event.payload.text ?? event.payload.summary).join('\n');
-  const refs = evidence.flatMap((event) => event.refs);
-  const verified = refs.some((ref) => ref.kind === 'test' || ref.kind === 'commit') || /\b(?:passed|pass|verified|fixed|success|succeeded|committed)\b/iu.test(text);
+  const signal = segmentSignal(evidence);
+  const verified = signal.kind === 'outcome' || signal.kind === 'fact';
   const kind: Observation['kind'] = /\b(?:preference|prefer|always use|style)\b/iu.test(text)
     ? 'preference'
     : /\b(?:environment|version|runtime|toolchain)\b/iu.test(text)
@@ -671,7 +823,6 @@ function buildObservation(evidence: readonly EvidenceEvent[], clock: () => Date)
         ? 'procedure'
         : 'problem';
   const first = evidence[0];
-  const summary = text.trim().split(/\r?\n/u).find((line) => line.trim().length > 0)?.slice(0, 240) ?? 'Observed development session outcome';
   return {
     verified,
     observation: {
@@ -680,14 +831,21 @@ function buildObservation(evidence: readonly EvidenceEvent[], clock: () => Date)
       ...(first?.projectId === undefined ? {} : { projectId: first.projectId }),
       ...(first?.sessionId === undefined ? {} : { sessionId: first.sessionId }),
       kind,
-      summary,
-      novelty: 0.8,
-      reuse: 0.7,
-      evidenceQuality: evidence.some((event) => event.sensitivity === 'redacted') ? 0.7 : 0.9,
+      summary: extractProseSummary(text),
+      novelty: signal.kind === 'outcome' ? 0.8 : signal.kind === 'fact' ? 0.6 : 0.3,
+      reuse: signal.kind === 'outcome' ? 0.8 : signal.kind === 'fact' ? 0.7 : 0.4,
+      evidenceQuality: !verified ? 0.5 : evidence.some((event) => event.sensitivity === 'redacted') ? 0.7 : 0.9,
       sensitivityRisk: evidence.some((event) => event.sensitivity === 'blocked') ? 1 : 0,
       createdAt: clock().toISOString(),
     },
   };
+}
+
+/** Segment signal with test/commit refs treated as outcome proof. */
+function segmentSignal(evidence: readonly EvidenceEvent[]): EvidenceSignal {
+  const signal = classifySegment(evidence);
+  const hasRefProof = evidence.some((event) => event.refs.some((ref) => ref.kind === 'test' || ref.kind === 'commit'));
+  return hasRefProof && signal.kind !== 'outcome' ? { kind: 'outcome', flags: [...signal.flags, 'test-ref'] } : signal;
 }
 
 function stableSegmentId(evidence: readonly EvidenceEvent[]): string {
@@ -704,17 +862,6 @@ class NoopAuditLog implements AuditLog {
   }
 }
 
-function memoryTypeForObservation(kind: Observation['kind']): MemoryType {
-  switch (kind) {
-    case 'preference': return 'preferences';
-    case 'environment': return 'environment';
-    case 'procedure': return 'procedures';
-    case 'problem': return 'lessons';
-    case 'decision': return 'projects';
-    case 'exploration': return 'lessons';
-  }
-}
-
 function isMissing(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
 }
@@ -724,9 +871,22 @@ function llmSystemPrompt(): string {
     'You are Taga memory distillation.',
     'Use only the supplied redacted Evidence; do not invent facts or source references.',
     'Return one JSON object and no markdown.',
-    'Every fact, entity, temporal fact, and causal link must cite one or more supplied evidence IDs.',
+    'Cite supplied evidence ids in the body for factual claims.',
     'Keep the candidate pending; never request or emit secrets, commands to execute, or external actions.',
   ].join(' ');
+}
+
+const MAX_LLM_PAYLOAD_CHARS = 4000;
+
+function boundedPayload(payload: EvidenceEvent['payload']): EvidenceEvent['payload'] {
+  const clip = (value: string): string => value.length <= MAX_LLM_PAYLOAD_CHARS
+    ? value
+    : `${value.slice(0, MAX_LLM_PAYLOAD_CHARS)}<elided chars=${value.length - MAX_LLM_PAYLOAD_CHARS} reason="oversize">`;
+  return {
+    ...payload,
+    summary: clip(payload.summary),
+    ...(payload.text === undefined ? {} : { text: clip(payload.text) }),
+  };
 }
 
 function buildLlmUserPrompt(input: DistillationInput): string {
@@ -739,20 +899,15 @@ function buildLlmUserPrompt(input: DistillationInput): string {
       sessionId: event.sessionId,
       occurredAt: event.occurredAt,
       refs: event.refs,
-      payload: event.payload,
+      payload: boundedPayload(event.payload),
       sensitivity: event.sensitivity,
     })),
     outputSchema: {
       memoryType: 'preferences|environment|procedures|lessons|projects',
       title: 'string',
       summary: 'string',
-      body: 'string',
+      body: 'string (cite supplied evidence ids inline for factual claims)',
       confidence: 'number 0..1',
-      facts: [{ text: 'string', evidenceIds: ['evidence-id'], confidence: 'number 0..1' }],
-      entities: [{ name: 'string', type: 'string?', evidenceIds: ['evidence-id'] }],
-      temporalFacts: [{ text: 'string', occurredStart: 'ISO datetime?', occurredEnd: 'ISO datetime?', evidenceIds: ['evidence-id'] }],
-      causalLinks: [{ fromFact: 'fact-id', toFact: 'fact-id', relation: 'causes|enables|prevents|contradicts', evidenceIds: ['evidence-id'] }],
-      applicability: { conditions: ['string'], exclusions: ['string'] },
     },
   });
 }
@@ -895,6 +1050,9 @@ export interface DistillerChainOptions {
   readonly audit?: AuditLog;
   readonly llm?: LlmConfig;
   readonly provider?: StructuredCompletionProvider;
+  readonly budgetState?: LlmBudgetState;
+  /** Budget accounting bucket: distill | learn | reflect | consolidation. */
+  readonly consumer?: string;
 }
 
 export function buildDistillerChain(options: DistillerChainOptions = {}): Distiller {
@@ -903,7 +1061,11 @@ export function buildDistillerChain(options: DistillerChainOptions = {}): Distil
   if (llm.mode === 'off') return deterministic;
   const baseProvider = options.provider ?? createLlmProvider(llm);
   if (baseProvider === undefined) return deterministic;
-  const provider = llm.dailyCap === undefined ? baseProvider : withDailyCap(baseProvider, llm.dailyCap);
+  const provider = withLlmBudget(baseProvider, {
+    ...(llm.dailyCap === undefined ? {} : { dailyCalls: llm.dailyCap }),
+    ...(llm.dailyTokens === undefined ? {} : { dailyTokens: llm.dailyTokens }),
+    ...(llm.perConsumerShare === undefined ? {} : { perConsumerShare: llm.perConsumerShare }),
+  }, options.consumer ?? 'distill', options.budgetState);
   const llmDistiller = new LlmDistiller({
     provider,
     providerName: llm.providerName,
@@ -945,7 +1107,7 @@ export function buildDistillerChain(options: DistillerChainOptions = {}): Distil
         subjectId: `fallback-${randomUUID()}`,
         occurredAt: new Date().toISOString(),
         reason: event.reason,
-        payload: { provider: event.provider, model: event.model, evidenceCount: event.evidenceIds.length },
+        payload: { provider: event.provider, model: event.model, evidenceCount: event.evidenceIds.length, ...(event.errorKind === undefined ? {} : { errorKind: event.errorKind }) },
       }).catch(() => undefined);
     });
   }

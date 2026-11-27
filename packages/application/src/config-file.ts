@@ -76,6 +76,8 @@ export const llmSectionSchema: z.ZodType<LlmFileSection> = z.object({
   timeoutMs: z.number().int().positive().optional(),
   providerName: z.string().min(1).optional(),
   dailyCap: z.number().int().positive().optional(),
+  dailyTokens: z.number().int().positive().optional(),
+  perConsumerShare: z.number().min(0).max(1).optional(),
 });
 
 export const consolidationSectionSchema: z.ZodType<ConsolidationFileSection> = z.object({

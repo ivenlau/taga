@@ -249,6 +249,14 @@ export class DatabaseStore {
     this.updateLeasedJob(jobId, workerId, 'succeeded', null);
   }
 
+  /** Rewrites a queued job's payload (used to merge events into a batched job). */
+  updateJobPayload(jobId: string, payload: string): boolean {
+    const result = this.database
+      .prepare("UPDATE jobs SET payload = ? WHERE id = ? AND status = 'queued'")
+      .run(payload, jobId);
+    return result.changes === 1;
+  }
+
   failJob(jobId: string, workerId: string, error: string, retryAt?: string): void {
     this.updateLeasedJob(jobId, workerId, retryAt === undefined ? 'dead' : 'failed', error, retryAt);
   }
@@ -258,6 +266,16 @@ export class DatabaseStore {
       .prepare('SELECT * FROM jobs WHERE id = ?')
       .get(jobId) as JobRow | undefined;
     return row === undefined ? null : toJobRecord(row);
+  }
+
+  deleteJobs(jobIds: readonly string[]): number {
+    if (jobIds.length === 0) return 0;
+    return this.transaction(() => {
+      const statement = this.database.prepare('DELETE FROM jobs WHERE id = ?');
+      let removed = 0;
+      for (const jobId of jobIds) removed += statement.run(jobId).changes;
+      return removed;
+    });
   }
 
   upsertMemoryIndex(entry: MemoryIndexEntry): void {

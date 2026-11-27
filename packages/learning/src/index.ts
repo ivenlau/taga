@@ -11,6 +11,7 @@ import { parseObservation, type EvidenceEvent, type MemoryType, type Observation
 import {
   buildDistillerChain,
   DatabaseCandidateRepository,
+  metadataLlmBudgetState,
   type SemanticDuplicateVerdict,
   type StructuredCompletionProvider,
 } from '../../distillation/src/index.js';
@@ -115,9 +116,12 @@ export async function runLearn(input: LearnInput, options: LearnOptions): Promis
     ...(options.audit === undefined ? {} : { audit: options.audit }),
     ...(options.llm === undefined ? {} : { llm: options.llm }),
     ...(options.provider === undefined ? {} : { provider: options.provider }),
+    consumer: 'learn',
+    budgetState: metadataLlmBudgetState(database),
   });
   const candidatesRepo = new DatabaseCandidateRepository(database);
   const kind = kindFromType(input.type);
+  const processed = new Set(database.listObservations().map((item) => item.id));
   let candidates = 0;
   let duplicates = 0;
   let skippedRedacted = 0;
@@ -140,6 +144,11 @@ export async function runLearn(input: LearnInput, options: LearnOptions): Promis
           continue;
         }
         database.saveEvidence(normalized.event);
+        const observation = buildLearnObservation(normalized.event, kind, input.project, clock);
+        if (processed.has(observation.id)) {
+          duplicates += 1;
+          continue;
+        }
         if (checker !== undefined) {
           const verdict = await checker(chunk.text);
           if (verdict !== undefined && verdict.duplicate) {
@@ -147,9 +156,10 @@ export async function runLearn(input: LearnInput, options: LearnOptions): Promis
             continue;
           }
         }
-        const observation = buildLearnObservation(normalized.event, kind, input.project, clock);
         const candidate = await chain.distill({ observation, evidence: [normalized.event], verified: true });
         candidatesRepo.save(candidate);
+        database.saveObservation(observation);
+        processed.add(observation.id);
         candidates += 1;
       }
     }

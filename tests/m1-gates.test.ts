@@ -58,8 +58,8 @@ describe('M1 fast path gate', () => {
     const database = new DatabaseStore(join(brain, 'taga.db'));
     const repository = new MarkdownMemoryRepository(brain);
     const candidates = new JsonCandidateRepository(join(brain, 'candidates.json'));
-    const evidenceA = normalizeEvidence({ id: 'evidence-a', source: 'watcher', agentId: 'pi', projectId: 'project-a', raw: 'agent pi: bounded retry policy', path: 'project-a/session.jsonl', occurredAt: '2026-11-10T00:00:00.000Z', capturedAt: '2026-11-10T00:00:01.000Z' }).event;
-    const evidenceB = normalizeEvidence({ id: 'evidence-b', source: 'watcher', agentId: 'claude-code', projectId: 'project-b', raw: 'agent claude-code: bounded retry policy', path: 'project-b/session.jsonl', occurredAt: '2026-11-10T00:00:00.000Z', capturedAt: '2026-11-10T00:00:01.000Z' }).event;
+    const evidenceA = normalizeEvidence({ id: 'evidence-a', source: 'watcher', agentId: 'pi', projectId: 'project-a', raw: 'agent pi: bounded retry policy; tests passed', path: 'project-a/session.jsonl', occurredAt: '2026-11-10T00:00:00.000Z', capturedAt: '2026-11-10T00:00:01.000Z' }).event;
+    const evidenceB = normalizeEvidence({ id: 'evidence-b', source: 'watcher', agentId: 'claude-code', projectId: 'project-b', raw: 'agent claude-code: bounded retry policy; tests passed', path: 'project-b/session.jsonl', occurredAt: '2026-11-10T00:00:00.000Z', capturedAt: '2026-11-10T00:00:01.000Z' }).event;
     const observation = (id: string, projectId?: string): Observation => ({
       id,
       evidenceIds: [projectId === 'project-a' ? 'evidence-a' : 'evidence-b'],

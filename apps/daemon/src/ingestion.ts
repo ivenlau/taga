@@ -5,6 +5,7 @@ import {
   type SourceCursor,
 } from '../../../packages/adapters/src/index.js';
 import { normalizeEvidence } from '../../../packages/redaction/src/index.js';
+import { classifyEvidenceSignal, type EvidenceSignal } from '../../../packages/distillation/src/index.js';
 import { DEFAULT_PROACTIVE_POLICY, ProactivePolicyService, type AuditLog, type ProactivePolicy } from '../../../packages/application/src/index.js';
 import type { DatabaseStore, JobRecord } from '../../../packages/storage/src/index.js';
 import type { EvidenceEvent } from '../../../packages/domain/src/index.js';
@@ -12,6 +13,8 @@ import type { EvidenceEvent } from '../../../packages/domain/src/index.js';
 export interface AgentIngestionOptions {
   readonly clock?: () => Date;
   readonly maxRecordsPerSource?: number;
+  /** Records older than this many days are skipped (cursor still advances). */
+  readonly lookbackDays?: number;
 }
 
 export interface AgentIngestionReport {
@@ -20,6 +23,8 @@ export interface AgentIngestionReport {
   readonly captured: number;
   readonly duplicates: number;
   readonly blocked: number;
+  /** Records skipped because they predate the collection lookback window. */
+  readonly aged: number;
   readonly errors: readonly AdapterError[];
   readonly health: readonly SourceRuntimeHealth[];
 }
@@ -53,6 +58,7 @@ export interface SourceTriggerReport {
 export class AgentIngestionService {
   private readonly clock: () => Date;
   private readonly maxRecordsPerSource: number;
+  private readonly lookbackDays: number;
 
   constructor(
     private readonly database: DatabaseStore,
@@ -61,6 +67,7 @@ export class AgentIngestionService {
   ) {
     this.clock = options.clock ?? (() => new Date());
     this.maxRecordsPerSource = options.maxRecordsPerSource ?? 100;
+    this.lookbackDays = options.lookbackDays ?? 7;
   }
 
   async runOnce(agentIds?: readonly string[]): Promise<AgentIngestionReport> {
@@ -71,6 +78,8 @@ export class AgentIngestionService {
     let captured = 0;
     let duplicates = 0;
     let blocked = 0;
+    let aged = 0;
+    const cutoff = this.clock().getTime() - this.lookbackDays * 86_400_000;
     const errors: AdapterError[] = [];
     const health: SourceRuntimeHealth[] = [];
 
@@ -94,6 +103,13 @@ export class AgentIngestionService {
         let processed = 0;
         let latestOffset = cursor.offset;
         for await (const record of source.readSince(cursor)) {
+          if (Date.parse(record.occurredAt) < cutoff) {
+            aged += 1;
+            this.database.saveCursor(cursorId, record.cursor.offset, source.parserVersion);
+            latestOffset = record.cursor.offset;
+            continue;
+          }
+          const signal = classifyEvidenceSignal(record.raw);
           const normalized = normalizeEvidence({
             id: `evidence-${createHash('sha256').update(`${adapter.id}:${record.id}`).digest('hex')}`,
             source: record.source,
@@ -104,10 +120,11 @@ export class AgentIngestionService {
             capturedAt: this.clock().toISOString(),
             parserVersion: source.parserVersion,
             refs: [{ kind: 'file', locator: record.path }],
+            structured: { signal },
           });
           if (this.database.saveEvidence(normalized.event)) {
             captured += 1;
-            enqueueDistillationJob(this.database, normalized.event);
+            if (isDistillable(signal)) enqueueDistillationJob(this.database, normalized.event, this.clock);
           }
           else duplicates += 1;
           saveSessionObservation(this.database, normalized.event, record.cursor.offset);
@@ -127,7 +144,7 @@ export class AgentIngestionService {
       }
     }
 
-    return { agents: selected.length, sources, captured, duplicates, blocked, errors, health };
+    return { agents: selected.length, sources, captured, duplicates, blocked, aged, errors, health };
   }
 }
 
@@ -135,6 +152,7 @@ export class AutomaticSourceRuntime {
   private readonly clock: () => Date;
   private readonly policy: ProactivePolicyService;
   private readonly debounceMs: number;
+  private readonly lookbackDays: number;
 
   constructor(
     private readonly database: DatabaseStore,
@@ -144,10 +162,12 @@ export class AutomaticSourceRuntime {
       readonly policy?: ProactivePolicy;
       readonly clock?: () => Date;
       readonly debounceMs?: number;
+      readonly lookbackDays?: number;
     } = {},
   ) {
     this.clock = options.clock ?? (() => new Date());
     this.debounceMs = options.debounceMs ?? 1_000;
+    this.lookbackDays = options.lookbackDays ?? 7;
     this.policy = new ProactivePolicyService(options.audit ?? new NoopAuditLog(), options.policy ?? DEFAULT_PROACTIVE_POLICY, this.clock);
   }
 
@@ -170,7 +190,9 @@ export class AutomaticSourceRuntime {
 
   async handle(job: JobRecord): Promise<AgentIngestionReport> {
     const trigger = JSON.parse(job.payload) as SourceTrigger;
-    if (trigger.event === 'hook' && trigger.raw !== undefined) {
+    const cutoff = this.clock().getTime() - this.lookbackDays * 86_400_000;
+    if (trigger.event === 'hook' && trigger.raw !== undefined && Date.parse(trigger.occurredAt ?? this.clock().toISOString()) >= cutoff) {
+      const signal = classifyEvidenceSignal(trigger.raw);
       const normalized = normalizeEvidence({
         id: `evidence-hook-${createHash('sha256').update(`${trigger.agentId}:${trigger.sessionId ?? ''}:${trigger.raw}`).digest('hex')}`,
         source: 'hook',
@@ -183,10 +205,11 @@ export class AutomaticSourceRuntime {
         capturedAt: this.clock().toISOString(),
         refs: trigger.path === undefined ? [] : [{ kind: 'file' as const, locator: trigger.path }],
         parserVersion: 'hook-runtime-v1',
+        structured: { signal },
       });
       this.database.saveEvidence(normalized.event);
       saveSessionObservation(this.database, normalized.event, 0);
-      if (normalized.event.sensitivity !== 'blocked') {
+      if (normalized.event.sensitivity !== 'blocked' && isDistillable(signal)) {
         this.enqueueDistillation(normalized.event);
       }
     }
@@ -194,7 +217,7 @@ export class AutomaticSourceRuntime {
   }
 
   private enqueueDistillation(event: { readonly id: string; readonly projectId?: string | undefined; readonly sessionId?: string | undefined }): void {
-    enqueueDistillationJob(this.database, event);
+    enqueueDistillationJob(this.database, event, this.clock);
   }
 }
 
@@ -208,12 +231,29 @@ class NoopAuditLog implements AuditLog {
   }
 }
 
-function enqueueDistillationJob(database: DatabaseStore, event: { readonly id: string; readonly projectId?: string | undefined; readonly sessionId?: string | undefined }): void {
-  const id = `distill-auto-${createHash('sha256').update(`${event.projectId ?? ''}:${event.sessionId ?? ''}:${event.id}`).digest('hex')}`;
+function isDistillable(signal: EvidenceSignal): boolean {
+  return signal.kind === 'outcome' || signal.kind === 'fact';
+}
+
+const DISTILL_BUCKET_MS = 60_000;
+
+function enqueueDistillationJob(database: DatabaseStore, event: { readonly id: string; readonly projectId?: string | undefined; readonly sessionId?: string | undefined }, clock: () => Date): void {
+  const payload = JSON.stringify({ projectId: event.projectId, sessionId: event.sessionId, eventIds: [event.id] });
+  // Batch per (project, session, minute): one job carries all events of the bucket.
+  const bucket = Math.floor(clock().getTime() / DISTILL_BUCKET_MS);
+  const bucketId = `distill-auto-${createHash('sha256').update(`${event.projectId ?? ''}:${event.sessionId ?? ''}:${bucket}`).digest('hex')}`;
+  if (database.enqueueJobIfAbsent({ id: bucketId, kind: 'distill.auto', payload })) return;
+  const existing = database.getJob(bucketId);
+  if (existing !== null && existing.status === 'queued') {
+    const parsed = JSON.parse(existing.payload) as { projectId?: string; sessionId?: string; eventIds?: string[] };
+    const eventIds = [...new Set([...(parsed.eventIds ?? []), event.id])];
+    if (database.updateJobPayload(bucketId, JSON.stringify({ ...parsed, eventIds }))) return;
+  }
+  // The bucket job is no longer mergeable (running/done) — never drop the event.
   database.enqueueJobIfAbsent({
-    id,
+    id: `distill-auto-event-${createHash('sha256').update(`${event.projectId ?? ''}:${event.sessionId ?? ''}:${event.id}`).digest('hex')}`,
     kind: 'distill.auto',
-    payload: JSON.stringify({ projectId: event.projectId, sessionId: event.sessionId }),
+    payload,
   });
 }
 

@@ -22,7 +22,7 @@ function observation(): Observation {
 
 describe('distillation and review', () => {
   it('rejects no-source input and creates reviewable candidates for valid evidence', async () => {
-    const evidence = normalizeEvidence({ id: 'evidence-1', source: 'watcher', raw: 'Use bounded retries', occurredAt: '2026-11-10T00:00:00.000Z', capturedAt: '2026-11-10T00:00:00.000Z' }).event;
+    const evidence = normalizeEvidence({ id: 'evidence-1', source: 'watcher', raw: 'Use bounded retries; tests passed', occurredAt: '2026-11-10T00:00:00.000Z', capturedAt: '2026-11-10T00:00:00.000Z' }).event;
     expect(evaluateGate({ observation: { ...observation(), evidenceIds: [] }, evidence: [] }).accepted).toBe(false);
     const candidates = new InMemoryCandidateRepository();
     const service = new DistillationService(new FakeDistiller(), candidates);
@@ -32,7 +32,7 @@ describe('distillation and review', () => {
   });
 
   it('accepts only through review and creates active memory with evidence sources', async () => {
-    const evidence = normalizeEvidence({ id: 'evidence-1', source: 'watcher', raw: 'Use bounded retries', occurredAt: '2026-11-10T00:00:00.000Z', capturedAt: '2026-11-10T00:00:00.000Z' }).event;
+    const evidence = normalizeEvidence({ id: 'evidence-1', source: 'watcher', raw: 'Use bounded retries; tests passed', occurredAt: '2026-11-10T00:00:00.000Z', capturedAt: '2026-11-10T00:00:00.000Z' }).event;
     const candidates = new InMemoryCandidateRepository();
     const candidate = await new DistillationService(new FakeDistiller(), candidates).createCandidate({ observation: observation(), evidence: [evidence] });
     const review = new ReviewService(candidates, new InMemoryMemoryRepository(), new InMemoryAuditLog(), () => new Date('2026-11-10T01:00:00.000Z'));
@@ -43,7 +43,7 @@ describe('distillation and review', () => {
 
   it('persists pending review candidates across repository instances', async () => {
     const fixture = await createTemporaryDirectory();
-    const evidence = normalizeEvidence({ id: 'evidence-persistent', source: 'watcher', raw: 'Use bounded retries', occurredAt: '2026-11-10T00:00:00.000Z', capturedAt: '2026-11-10T00:00:00.000Z' }).event;
+    const evidence = normalizeEvidence({ id: 'evidence-persistent', source: 'watcher', raw: 'Use bounded retries; tests passed', occurredAt: '2026-11-10T00:00:00.000Z', capturedAt: '2026-11-10T00:00:00.000Z' }).event;
     const path = join(fixture.path, 'candidates.json');
     const first = new JsonCandidateRepository(path);
     const service = new DistillationService(new FakeDistiller(), first);

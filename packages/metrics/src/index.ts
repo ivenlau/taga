@@ -101,6 +101,10 @@ export interface LearningEffectivenessReport {
   readonly window: MetricWindow;
   readonly candidates: { readonly pending: number; readonly accepted: number; readonly rejected: number; readonly total: number };
   readonly byMode: readonly { readonly mode: string; readonly created: number; readonly accepted: number; readonly acceptRate: number }[];
+  /** L0 mining quality: acceptance of deterministic template drafts. */
+  readonly drafts: { readonly created: number; readonly accepted: number; readonly acceptanceRate: number };
+  /** L2 polish quality: accepts where the polish pass ran vs applied. */
+  readonly polish: { readonly attempted: number; readonly applied: number; readonly rate: number };
   readonly learnRuns: number;
   readonly llmShadowComparisons: number;
   readonly llmFallbacks: number;
@@ -276,6 +280,9 @@ export class MetricsService {
     const pending = [...decisions.values()].reduce((sum, bucket) => sum + bucket.pending, 0);
     const auditEvents = await new SqliteAuditLog(this.database).list();
     const auditInWindow = auditEvents.filter((event) => inWindow(event.occurredAt, window));
+    const draftBucket = decisions.get('deterministic') ?? { created: 0, accepted: 0, rejected: 0, pending: 0 };
+    const polishAttempts = auditInWindow.filter((event) => event.eventType === 'candidate.accepted' && typeof (event.payload as Record<string, unknown>).polished === 'boolean');
+    const polishApplied = polishAttempts.filter((event) => (event.payload as Record<string, unknown>).polished === true).length;
     return {
       window,
       candidates: {
@@ -283,6 +290,16 @@ export class MetricsService {
         rejected,
         pending,
         total: candidates.length,
+      },
+      drafts: {
+        created: draftBucket.created,
+        accepted: draftBucket.accepted,
+        acceptanceRate: draftBucket.created > 0 ? draftBucket.accepted / draftBucket.created : 0,
+      },
+      polish: {
+        attempted: polishAttempts.length,
+        applied: polishApplied,
+        rate: polishAttempts.length > 0 ? polishApplied / polishAttempts.length : 0,
       },
       byMode: [...decisions.entries()].map(([mode, bucket]) => ({
         mode,

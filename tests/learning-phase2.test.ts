@@ -9,9 +9,12 @@ import {
 } from '../packages/learning/src/index.js';
 import {
   withDailyCap,
+  withLlmBudget,
   buildDistillerChain,
   DatabaseCandidateRepository,
+  metadataLlmBudgetState,
   type DistillationInput,
+  type LlmBudgetUsage,
   type StructuredCompletionProvider,
 } from '../packages/distillation/src/index.js';
 import { MetricsService } from '../packages/metrics/src/index.js';
@@ -90,6 +93,22 @@ describe('withDailyCap', () => {
     const response = await capped.complete({ system: 's', user: 'u', model: 'm', timeoutMs: 100 });
     expect(response.text).toBe('{"ok":true}');
   });
+
+  it('shares the daily cap across wrapper instances through persisted state', async () => {
+    const now = Date.parse('2026-11-14T10:00:00.000Z');
+    const clock = (): Date => new Date(now);
+    const counts = new Map<string, number>();
+    const state = {
+      load: (day: string): number => counts.get(day) ?? 0,
+      save: (day: string, count: number): void => { counts.set(day, count); },
+    };
+    const inner: StructuredCompletionProvider = {
+      complete: () => Promise.resolve({ text: '{"ok":true}', latencyMs: 1 }),
+    };
+    await withDailyCap(inner, 2, clock, state).complete({ system: 's', user: 'u', model: 'm', timeoutMs: 100 });
+    await withDailyCap(inner, 2, clock, state).complete({ system: 's', user: 'u', model: 'm', timeoutMs: 100 });
+    await expect(withDailyCap(inner, 2, clock, state).complete({ system: 's', user: 'u', model: 'm', timeoutMs: 100 })).rejects.toThrow('llm daily cap reached (2 calls on 2026-11-14)');
+  });
 });
 
 describe('daily cap in distiller chain', () => {
@@ -106,6 +125,26 @@ describe('daily cap in distiller chain', () => {
     expect(second.model?.fallbackReason).toContain('llm daily cap reached');
     const events = await audit.list();
     expect(events.some((event) => event.eventType === 'distill.llm_fallback' && event.reason.includes('llm daily cap reached'))).toBe(true);
+  });
+
+  it('keeps the cap across buildDistillerChain instances via budgetState', async () => {
+    const audit = new InMemoryAuditLog();
+    const provider: StructuredCompletionProvider = {
+      complete: () => Promise.resolve({ text: draftOutput(), latencyMs: 1 }),
+    };
+    const store = new Map<string, LlmBudgetUsage>();
+    const budgetState = {
+      load: (day: string): LlmBudgetUsage | null => store.get(day) ?? null,
+      save: (day: string, usage: LlmBudgetUsage): void => { store.set(day, usage); },
+    };
+    const first = buildDistillerChain({ ...llmChain(audit, { dailyCap: 2 }), provider, budgetState });
+    const firstResult = await first.distill(input);
+    expect(firstResult.model?.mode).toBe('llm');
+    await first.distill(input);
+    const second = buildDistillerChain({ ...llmChain(audit, { dailyCap: 2 }), provider, budgetState });
+    const secondResult = await second.distill(input);
+    expect(secondResult.model?.mode).toBe('deterministic');
+    expect(secondResult.model?.fallbackReason).toContain('llm daily cap reached');
   });
 });
 
@@ -230,5 +269,91 @@ describe('learning effectiveness in digest', () => {
       else process.env.TAGA_LLM_MODE = previousMode;
       await fixture.cleanup();
     }
+  }, 30_000);
+});
+
+describe('withLlmBudget', () => {
+  const request = { system: 's', user: 'u', model: 'm', timeoutMs: 100 };
+
+  function countingProvider(): { provider: StructuredCompletionProvider; requests: typeof request[] } {
+    const requests: typeof request[] = [];
+    return {
+      requests,
+      provider: {
+        complete: (req: typeof request) => {
+          requests.push(req);
+          return Promise.resolve({ text: '{"ok":true}', inputTokens: 30, outputTokens: 20, latencyMs: 1 });
+        },
+      },
+    };
+  }
+
+  it('rejects once the daily token budget is exhausted and records usage', async () => {
+    const { provider, requests } = countingProvider();
+    const store = new Map<string, LlmBudgetUsage>();
+    const state = {
+      load: (day: string): LlmBudgetUsage | null => store.get(day) ?? null,
+      save: (day: string, usage: LlmBudgetUsage): void => { store.set(day, usage); },
+    };
+    const day = new Date().toISOString().slice(0, 10);
+    const capped = withLlmBudget(provider, { dailyTokens: 80 }, 'distill', state);
+    await capped.complete(request);
+    await capped.complete(request);
+    expect(store.get(day)).toMatchObject({ calls: 2, tokens: 100 });
+    await expect(capped.complete(request)).rejects.toThrow('llm daily token budget reached (80 tokens');
+    expect(requests).toHaveLength(2);
+  });
+
+  it('isolates consumers by share without blocking other consumers', async () => {
+    const { provider } = countingProvider();
+    const store = new Map<string, LlmBudgetUsage>();
+    const state = {
+      load: (day: string): LlmBudgetUsage | null => store.get(day) ?? null,
+      save: (day: string, usage: LlmBudgetUsage): void => { store.set(day, usage); },
+    };
+    const learn = withLlmBudget(provider, { dailyCalls: 4, perConsumerShare: 0.5 }, 'learn', state);
+    const distill = withLlmBudget(provider, { dailyCalls: 4, perConsumerShare: 0.5 }, 'distill', state);
+    await learn.complete(request);
+    await learn.complete(request);
+    await expect(learn.complete(request)).rejects.toThrow('llm consumer budget reached (learn');
+    await expect(distill.complete(request)).resolves.toBeDefined();
+  });
+
+  it('persists usage across wrapper instances through metadata state', async () => {
+    const fixture = await createTemporaryDirectory();
+    const database = new DatabaseStore(`${fixture.path}/taga.db`);
+    const state = metadataLlmBudgetState(database);
+    const { provider } = countingProvider();
+    await withLlmBudget(provider, { dailyCalls: 2 }, 'distill', state).complete(request);
+    await withLlmBudget(provider, { dailyCalls: 2 }, 'learn', state).complete(request);
+    const usage = state.load(new Date().toISOString().slice(0, 10));
+    expect(usage?.calls).toBe(2);
+    expect(usage?.consumers).toMatchObject({ distill: { calls: 1 }, learn: { calls: 1 } });
+    await expect(withLlmBudget(provider, { dailyCalls: 2 }, 'reflect', state).complete(request)).rejects.toThrow('llm daily cap reached (2 calls');
+    database.close();
+    await fixture.cleanup();
+  });
+});
+
+describe('learn incremental watermark', () => {
+  it('does not resubmit already-learned chunks to the LLM', async () => {
+    const fixture = await createTemporaryDirectory();
+    const brain = fixture.path;
+    const requests: string[] = [];
+    const provider: StructuredCompletionProvider = {
+      complete: (req) => {
+        requests.push(req.user);
+        return Promise.resolve({ text: JSON.stringify({ memoryType: 'lessons', title: 'T', summary: 'S', body: 'B', confidence: 0.9 }), latencyMs: 1 });
+      },
+    };
+    const options = { brainPath: brain, llm: { mode: 'on' as const, endpoint: 'http://fixture', model: 'fixture-model', timeoutMs: 1_000, providerName: 'fixture-llm' }, provider };
+    const first = await runLearn({ text: 'Watermark probe content; tests passed.', type: 'lessons' }, options);
+    expect(first.candidates).toBe(1);
+    expect(requests).toHaveLength(1);
+    const second = await runLearn({ text: 'Watermark probe content; tests passed.', type: 'lessons' }, options);
+    expect(second.candidates).toBe(0);
+    expect(second.duplicates).toBe(1);
+    expect(requests).toHaveLength(1);
+    await fixture.cleanup();
   }, 30_000);
 });

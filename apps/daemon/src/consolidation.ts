@@ -13,7 +13,7 @@ import { GardenService } from '../../../packages/garden/src/index.js';
 import type { NotificationService } from '../../../packages/notifications/src/index.js';
 import { enqueueSemanticUpsert, ZvecMemoryIndex } from '../../../packages/semantic-index/src/index.js';
 import { FtsRetrievalProvider } from '../../../packages/retrieval/src/index.js';
-import { FetchOpenAiCompatibleProvider, withDailyCap, type StructuredCompletionProvider } from '../../../packages/distillation/src/index.js';
+import { FetchOpenAiCompatibleProvider, metadataLlmBudgetState, withLlmBudget, type StructuredCompletionProvider } from '../../../packages/distillation/src/index.js';
 import { MarkdownMemoryRepository, type DatabaseStore, type JobRecord, type StoredMemory } from '../../../packages/storage/src/index.js';
 import { LlmMergeJudge } from './consolidation-llm.js';
 
@@ -144,7 +144,7 @@ async function semanticDedupVerdicts(
     return { verdicts, bestMatch, mergedText };
   }
   const embedder = createLocalBgeM3Embedder({ modelPath, batchSize: 4 });
-  const judge = createMergeJudge(config);
+  const judge = createMergeJudge(config, database);
   const byId = new Map(records.map((record) => [record.memory.id, record]));
 
   for (const draft of drafts) {
@@ -244,13 +244,16 @@ function reportOverlap(
   }).catch(() => undefined);
 }
 
-function createMergeJudge(config: ConsolidationConfig): LlmMergeJudge | undefined {
+function createMergeJudge(config: ConsolidationConfig, database: DatabaseStore): LlmMergeJudge | undefined {
   if (config.llm === undefined) return undefined;
-  let provider: StructuredCompletionProvider = new FetchOpenAiCompatibleProvider({
+  const provider: StructuredCompletionProvider = withLlmBudget(new FetchOpenAiCompatibleProvider({
     endpoint: config.llm.endpoint,
     ...(config.llm.apiKey === undefined ? {} : { apiKey: config.llm.apiKey }),
-  });
-  if (config.llm.dailyCap !== undefined) provider = withDailyCap(provider, config.llm.dailyCap);
+  }), {
+    ...(config.llm.dailyCap === undefined ? {} : { dailyCalls: config.llm.dailyCap }),
+    ...(config.llm.dailyTokens === undefined ? {} : { dailyTokens: config.llm.dailyTokens }),
+    ...(config.llm.perConsumerShare === undefined ? {} : { perConsumerShare: config.llm.perConsumerShare }),
+  }, 'consolidation', metadataLlmBudgetState(database));
   return new LlmMergeJudge(provider, config.llm.model, config.llm.timeoutMs);
 }
 

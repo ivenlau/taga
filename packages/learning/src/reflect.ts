@@ -6,6 +6,7 @@ import { type AuditLog, type LlmConfig } from '../../application/src/index.js';
 import {
   buildDistillerChain,
   DatabaseCandidateRepository,
+  metadataLlmBudgetState,
   type StructuredCompletionProvider,
 } from '../../distillation/src/index.js';
 import { DatabaseStore, MarkdownMemoryRepository } from '../../storage/src/index.js';
@@ -64,6 +65,10 @@ export interface ReflectReport {
 
 export const REFLECT_JOB_KIND = 'reflect.run';
 
+// Prompt guards: a reflect group stays bounded even when a type:scope bucket grows large.
+const MAX_REFLECT_GROUP_MEMBERS = 20;
+const MAX_MEMBER_SUMMARY_CHARS = 240;
+
 export function enqueueScheduledReflectScan(
   database: { enqueueJobIfAbsent(input: { id: string; kind: string; payload: string }): boolean },
   config: ReflectConfig,
@@ -108,12 +113,14 @@ export async function runReflect(input: ReflectInput, options: ReflectRunOptions
   });
 
   const groups = groupMemories(memories, config.minGroupSize, input.project);
+  const database = new DatabaseStore(join(options.brainPath, 'taga.db'));
   const chain = buildDistillerChain({
     ...(options.audit === undefined ? {} : { audit: options.audit }),
     ...(options.llm === undefined ? {} : { llm: options.llm }),
     ...(options.provider === undefined ? {} : { provider: options.provider }),
+    consumer: 'reflect',
+    budgetState: metadataLlmBudgetState(database),
   });
-  const database = new DatabaseStore(join(options.brainPath, 'taga.db'));
   const candidatesRepo = new DatabaseCandidateRepository(database);
   const garden = new GardenService(database);
   const groupReports: ReflectGroupReport[] = [];
@@ -182,7 +189,7 @@ function groupMemories(memories: readonly Memory[], minGroupSize: number, projec
   return [...groups.entries()]
     .filter(([, bucket]) => bucket.length >= minGroupSize)
     .sort((left, right) => right[1].length - left[1].length)
-    .map(([key, bucket]) => ({ key, members: bucket }));
+    .map(([key, bucket]) => ({ key, members: bucket.slice(0, MAX_REFLECT_GROUP_MEMBERS) }));
 }
 
 async function reflectGroup(
@@ -193,7 +200,7 @@ async function reflectGroup(
   clock: () => Date,
 ): Promise<{ id: string } | null> {
   const membersText = group.members
-    .map((memory, index) => `[${index + 1}] (${memory.type}, confidence ${memory.confidence.toFixed(2)}, useful ${memory.usefulCount}) ${memory.title} — ${memory.summary}`)
+    .map((memory, index) => `[${index + 1}] (${memory.type}, confidence ${memory.confidence.toFixed(2)}, useful ${memory.usefulCount}) ${memory.title} — ${memory.summary.slice(0, MAX_MEMBER_SUMMARY_CHARS)}`)
     .join('\n');
   const raw = [
     `以下 ${group.members.length} 条既有记忆同属 ${group.key}，来自近期活跃记忆。请提炼一条更高层的洞察（insight）：这些记忆共同指向什么规律、约束或最佳实践？`,

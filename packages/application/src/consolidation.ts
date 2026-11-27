@@ -10,6 +10,8 @@ export interface ConsolidationLlmConfig {
   readonly model: string;
   readonly timeoutMs: number;
   readonly dailyCap?: number;
+  readonly dailyTokens?: number;
+  readonly perConsumerShare?: number;
 }
 
 export interface ConsolidationFileSection {
@@ -58,6 +60,8 @@ function consolidationLlmFromLayers(env: NodeJS.ProcessEnv, file?: LlmFileSectio
     model: config.model,
     timeoutMs: config.timeoutMs,
     ...(config.dailyCap === undefined ? {} : { dailyCap: config.dailyCap }),
+    ...(config.dailyTokens === undefined ? {} : { dailyTokens: config.dailyTokens }),
+    ...(config.perConsumerShare === undefined ? {} : { perConsumerShare: config.perConsumerShare }),
   };
 }
 

@@ -10,7 +10,7 @@ import type { Scope } from '../../domain/src/index.js';
 import type { DatabaseStore } from '../../storage/src/index.js';
 
 export type NotificationLevel = 'L1' | 'L2';
-export type NotificationKind = 'candidate' | 'stale' | 'conflict' | 'precheck';
+export type NotificationKind = 'candidate' | 'stale' | 'conflict' | 'precheck' | 'budget';
 export type NotificationStatus = 'queued' | 'deferred' | 'suppressed' | 'delivered' | 'opened' | 'dismissed';
 export type NotificationFeedback = 'opened' | 'cited' | 'useful' | 'not_useful' | 'dismissed';
 
@@ -234,7 +234,7 @@ function localPolicyTimestamp(value: Date): string {
 }
 
 function parseRecord(value: unknown): NotificationRecord {
-  if (!isRecord(value) || value.schemaVersion !== 1 || typeof value.id !== 'string' || typeof value.fingerprint !== 'string' || !['L1', 'L2'].includes(String(value.level)) || !['candidate', 'stale', 'conflict', 'precheck'].includes(String(value.kind)) || typeof value.subjectType !== 'string' || typeof value.subjectId !== 'string' || typeof value.title !== 'string' || typeof value.message !== 'string' || typeof value.source !== 'string' || !['queued', 'deferred', 'suppressed', 'delivered', 'opened', 'dismissed'].includes(String(value.status)) || typeof value.reason !== 'string' || typeof value.createdAt !== 'string' || typeof value.updatedAt !== 'string') throw new Error('notification record is invalid');
+  if (!isRecord(value) || value.schemaVersion !== 1 || typeof value.id !== 'string' || typeof value.fingerprint !== 'string' || !['L1', 'L2'].includes(String(value.level)) || !['candidate', 'stale', 'conflict', 'precheck', 'budget'].includes(String(value.kind)) || typeof value.subjectType !== 'string' || typeof value.subjectId !== 'string' || typeof value.title !== 'string' || typeof value.message !== 'string' || typeof value.source !== 'string' || !['queued', 'deferred', 'suppressed', 'delivered', 'opened', 'dismissed'].includes(String(value.status)) || typeof value.reason !== 'string' || typeof value.createdAt !== 'string' || typeof value.updatedAt !== 'string') throw new Error('notification record is invalid');
   return value as unknown as NotificationRecord;
 }
 

@@ -8,8 +8,8 @@ export {
   scopeWeight,
 } from './governance.js';
 export { SqliteAuditLog } from './sqlite-audit.js';
-export { llmConfigFromEnv, resolveLlmConfig } from './llm.js';
-export type { LlmConfig, LlmFileSection, LlmMode } from './llm.js';
+export { llmConfigFromEnv, llmConfigFromResolved, resolveLlmConfig, DEFAULT_LLM_CONSUMER_SHARE, DEFAULT_LLM_DAILY_CALLS, DEFAULT_LLM_DAILY_TOKENS } from './llm.js';
+export type { LlmConfig, LlmFileSection, LlmMode, ResolvedLlmSection } from './llm.js';
 export { resolveSemanticConfig } from './semantic-config.js';
 export type { SemanticConfig, SemanticFileSection, SemanticMode } from './semantic-config.js';
 export { parseValidatedConfigFile, readValidatedConfigFile } from './config-file.js';

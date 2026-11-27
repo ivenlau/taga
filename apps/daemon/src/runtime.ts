@@ -12,7 +12,7 @@ import {
   type LearnInput,
 } from '../../../packages/learning/src/index.js';
 import { MetricsService } from '../../../packages/metrics/src/index.js';
-import { SqliteAuditLog, type ConsolidationConfig, type LlmConfig } from '../../../packages/application/src/index.js';
+import { llmConfigFromResolved, SqliteAuditLog, type ConsolidationConfig, type LlmConfig } from '../../../packages/application/src/index.js';
 import type { ResolvedConfig } from '../../../packages/config/src/index.js';
 import { AutomaticDistillationService } from '../../../packages/distillation/src/index.js';
 import { NotificationService } from '../../../packages/notifications/src/index.js';
@@ -21,7 +21,7 @@ import { DatabaseStore, type JobRecord } from '../../../packages/storage/src/ind
 import { startEmbedRpcServer, type EmbedRpcServer, type Embedder } from '../../../packages/embedding/src/index.js';
 import { semanticJobHandlers } from './semantic.js';
 import { consolidationJobHandlers } from './consolidation.js';
-import { buildDistillerChain } from '../../../packages/distillation/src/index.js';
+import { MiningDraftDistiller, PolishService, LlmAdjudicator, createLlmProvider, metadataLlmBudgetState, withLlmBudget, type CandidatePolisher } from '../../../packages/distillation/src/index.js';
 import {
   DaemonLease,
   stopRequested,
@@ -205,6 +205,19 @@ export function defaultJobHandlers(brainPath: string, database: DatabaseStore, c
     maxGroups: config.reflection.maxGroups,
   };
   const duplicateChecker = createSemanticDuplicateChecker(brainPath, { modelPath: config.retrieval.semantic.modelPath });
+  // L2 quality passes (polish on accept, adjudicate on conflicts): one budget-wrapped provider per consumer.
+  const qualityProvider = llm.mode === 'on' ? createLlmProvider(llm) : undefined;
+  const budgetConfig = {
+    ...(llm.dailyCap === undefined ? {} : { dailyCalls: llm.dailyCap }),
+    ...(llm.dailyTokens === undefined ? {} : { dailyTokens: llm.dailyTokens }),
+    ...(llm.perConsumerShare === undefined ? {} : { perConsumerShare: llm.perConsumerShare }),
+  };
+  const polisher: CandidatePolisher | undefined = qualityProvider === undefined
+    ? undefined
+    : new PolishService(withLlmBudget(qualityProvider, budgetConfig, 'polish', metadataLlmBudgetState(database)), llm.model, llm.timeoutMs);
+  const adjudicator = qualityProvider === undefined
+    ? undefined
+    : new LlmAdjudicator(withLlmBudget(qualityProvider, budgetConfig, 'adjudicate', metadataLlmBudgetState(database)), llm.model, llm.timeoutMs);
   return new Map<string, DaemonJobHandler>([
     ...semanticJobHandlers(brainPath, database, config.retrieval.semantic.modelPath),
     ...consolidationJobHandlers(brainPath, database, resolvedConsolidationConfig(config), config.retrieval.semantic.modelPath, { notifications }),
@@ -213,7 +226,7 @@ export function defaultJobHandlers(brainPath: string, database: DatabaseStore, c
     }],
     ['learn.distill', async (job) => {
       const input = JSON.parse(job.payload) as LearnInput;
-      await runLearn(input, { brainPath, audit });
+      await runLearn(input, { brainPath, audit, llm });
     }],
     ['learn.correction', async (job) => {
       const payload = JSON.parse(job.payload) as { memoryId?: unknown; note?: unknown; project?: unknown };
@@ -222,7 +235,7 @@ export function defaultJobHandlers(brainPath: string, database: DatabaseStore, c
         memoryId: payload.memoryId,
         ...(typeof payload.note === 'string' && payload.note.length > 0 ? { note: payload.note } : {}),
         ...(typeof payload.project === 'string' ? { project: payload.project } : {}),
-      }, { brainPath, audit });
+      }, { brainPath, audit, llm });
     }],
     [REFLECT_JOB_KIND, async () => {
       const report = await runReflect({}, { brainPath, audit, llm, config: reflectConfig });
@@ -243,13 +256,30 @@ export function defaultJobHandlers(brainPath: string, database: DatabaseStore, c
       const memories = await new MarkdownMemoryRepository(brainPath).list();
       const report = new GardenService(database).scanSafe(memories);
       for (const proposal of report.proposals.filter((item) => item.category === 'stale' || item.category === 'conflict')) {
+        let advice: string | undefined;
+        if (proposal.category === 'conflict' && adjudicator !== undefined) {
+          const pair = proposal.affectedIds
+            .map((id) => memories.find((memory) => memory.id === id))
+            .filter((memory): memory is NonNullable<typeof memory> => memory !== undefined);
+          if (pair.length >= 2) {
+            const [first, second] = pair;
+            const result = await adjudicator.adjudicate({
+              a: { id: first!.id, title: first!.title, summary: first!.summary },
+              b: { id: second!.id, title: second!.title, summary: second!.summary },
+            });
+            if (result.adjudicated) {
+              database.upsertMetadata(`garden-adjudication:${proposal.id}`, JSON.stringify(result));
+              advice = `LLM 裁决建议：${result.verdict}（${result.reason}）`;
+            }
+          }
+        }
         await notifications.enqueue({
           level: 'L1',
           kind: proposal.category === 'stale' ? 'stale' : 'conflict',
           subjectType: 'garden_proposal',
           subjectId: proposal.id,
           title: `${proposal.category} memory finding`,
-          message: proposal.reason,
+          message: advice === undefined ? proposal.reason : `${proposal.reason} — ${advice}`,
           source: 'garden.scan',
           dedupeKey: proposal.fingerprint,
         });
@@ -259,15 +289,17 @@ export function defaultJobHandlers(brainPath: string, database: DatabaseStore, c
       await new MetricsService(database).digest({ refreshRequested: true, daemonAvailable: true });
     }],
     ['distill.auto', async (job) => {
-      const payload = JSON.parse(job.payload) as { projectId?: string; sessionId?: string };
+      const payload = JSON.parse(job.payload) as { projectId?: string; sessionId?: string; eventIds?: string[] };
+      // Mining drafts are deterministic (L0); the LLM only polishes accepted knowledge (L2, later phase).
       await new AutomaticDistillationService(
         database,
-        buildDistillerChain({ audit, llm }),
+        new MiningDraftDistiller(),
         undefined,
         {
           audit,
           memories: new MarkdownMemoryRepository(brainPath),
           notifications,
+          ...(polisher === undefined ? {} : { polisher }),
           ...(duplicateChecker === undefined ? {} : {
             duplicateGate: async (candidate) => duplicateChecker(`${candidate.title}\n${candidate.summary}`),
           }),
@@ -278,15 +310,7 @@ export function defaultJobHandlers(brainPath: string, database: DatabaseStore, c
 }
 
 export function resolvedLlmConfig(config: ResolvedConfig): LlmConfig {
-  return {
-    mode: config.llm.mode,
-    endpoint: config.llm.endpoint,
-    model: config.llm.model,
-    timeoutMs: config.llm.timeoutMs,
-    providerName: config.llm.provider,
-    ...(config.llm.apiKey === undefined ? {} : { apiKey: config.llm.apiKey }),
-    ...(config.llm.dailyCap === undefined ? {} : { dailyCap: config.llm.dailyCap }),
-  };
+  return llmConfigFromResolved(config.llm);
 }
 
 export function resolvedConsolidationConfig(config: ResolvedConfig): ConsolidationConfig {
@@ -304,6 +328,8 @@ export function resolvedConsolidationConfig(config: ResolvedConfig): Consolidati
       timeoutMs: llm.timeoutMs,
       ...(llm.apiKey === undefined ? {} : { apiKey: llm.apiKey }),
       ...(llm.dailyCap === undefined ? {} : { dailyCap: llm.dailyCap }),
+      ...(llm.dailyTokens === undefined ? {} : { dailyTokens: llm.dailyTokens }),
+      ...(llm.perConsumerShare === undefined ? {} : { perConsumerShare: llm.perConsumerShare }),
     },
   };
 }

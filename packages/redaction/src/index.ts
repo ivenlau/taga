@@ -35,6 +35,7 @@ export interface NormalizeEvidenceInput {
   readonly capturedAt: string;
   readonly refs?: readonly SourceRef[];
   readonly maxBytes?: number;
+  readonly structured?: Record<string, unknown>;
 }
 
 export interface NormalizedEvidence {
@@ -85,8 +86,8 @@ export function normalizeEvidence(input: NormalizeEvidenceInput): NormalizedEvid
     redactionVersion: 'rules-v1',
   } : redactText(input.raw);
   const payload = redacted.action === 'block'
-    ? { summary: `blocked evidence (${redacted.findings.map((finding) => finding.kind).join(', ')})` }
-    : { summary: redacted.text.slice(0, 500), text: redacted.text };
+    ? { summary: `blocked evidence (${redacted.findings.map((finding) => finding.kind).join(', ')})`, ...(input.structured === undefined ? {} : { structured: input.structured }) }
+    : { summary: redacted.text.slice(0, 500), text: redacted.text, ...(input.structured === undefined ? {} : { structured: input.structured }) };
   const event = parseEvidenceEvent({
     id: input.id,
     schemaVersion: 1,
