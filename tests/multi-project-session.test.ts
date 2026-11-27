@@ -43,7 +43,10 @@ describe('multi-project MCP sessions', () => {
     expect(searchB).toContain('Global retry');
 
     const conflict = await call(server, 8, 'memory_search', { session_id: 'a', project_id: startB.data.project_id, query: 'retry' });
-    expect(conflict.error?.message).toContain('conflicts with session project');
+    // Failures come back as tool results so the agent can read the cause and recover.
+    expect(conflict.error).toBeUndefined();
+    expect((conflict.result as { isError?: boolean }).isError).toBe(true);
+    expect(data<{ error: { code: string; message: string } }>(conflict)).toMatchObject({ error: { code: 'CONFLICT', message: 'explicit project_id conflicts with session project' } });
     server.close();
     await fixture.cleanup();
   }, 20_000);
