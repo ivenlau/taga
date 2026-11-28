@@ -131,6 +131,26 @@ describe('Lite MCP contract', () => {
 });
 
 describe('MCP agent-facing contract', () => {
+  it('injects protocol instructions with the retrieval mode at initialize', async () => {
+    const fixture = await createTemporaryDirectory();
+    const server = new LiteMcpServer(fixture.path);
+    const init = await call(server, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } });
+    const instructions = (init.result as { instructions?: string }).instructions ?? '';
+    expect(instructions).toContain('BEFORE ANYTHING ELSE');
+    expect(instructions).toContain('memory_session_start');
+    expect(instructions).toContain('memory_record');
+    expect(instructions).toContain('duplicate_of');
+    expect(instructions).toContain('lexical only');
+    const hybrid = new LiteMcpServer(fixture.path, () => new Date(), semanticConfigured(fixture.path));
+    try {
+      const hybridInit = await call(hybrid, { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+      expect((hybridInit.result as { instructions?: string }).instructions).toContain('Hybrid semantic retrieval is active');
+    } finally {
+      hybrid.close();
+    }
+    await fixture.cleanup();
+  }, 20_000);
+
   it('describes every parameter, annotates every tool, and follows the retrieval mode', async () => {
     const fixture = await createTemporaryDirectory();
     const server = new LiteMcpServer(fixture.path);
@@ -245,6 +265,28 @@ describe('MCP agent-facing contract', () => {
     expect(feedback.payload.data.status).toBe('draft');
     expect(feedback.payload.data.useful_count).toBe(1);
     expect(feedback.payload.data.hint).toContain('not recalled yet');
+    await fixture.cleanup();
+  }, 20_000);
+
+  it('refuses a near-identical record against an active memory and points at memory_feedback', async () => {
+    const fixture = await createTemporaryDirectory();
+    await seed(fixture.path, [{ memory: memory(), body: 'retry body' }]);
+    const server = new LiteMcpServer(fixture.path);
+    // Same title as the seeded active memory: the gate stops the write before any new draft exists.
+    const duplicate = toolResult(await call(server, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'memory_record', arguments: {
+      type: 'lessons', title: 'Use bounded retries', body: 'Retry transient failures with a bounded delay.', requested_status: 'draft', actor: 'agent', sources: [{ kind: 'test', locator: 'fixture' }],
+    } } }));
+    expect(duplicate.isError).toBe(false);
+    expect(duplicate.payload.data.duplicate_of).toBe('mem-mcp');
+    expect(duplicate.payload.data.action).toContain('memory_feedback');
+    expect(duplicate.payload.next_actions).toEqual([]);
+    expect(duplicate.payload.data.memory_id).toBeUndefined();
+    // A different lesson is not blocked.
+    const distinct = toolResult(await call(server, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'memory_record', arguments: {
+      type: 'environment', title: 'Web workbench binds 127.0.0.1', body: 'The local web console only listens on the loopback interface.', requested_status: 'draft', actor: 'agent', sources: [{ kind: 'test', locator: 'fixture' }],
+    } } }));
+    expect(distinct.payload.data.status).toBe('draft');
+    expect(distinct.payload.data.duplicate_of).toBeUndefined();
     await fixture.cleanup();
   }, 20_000);
 

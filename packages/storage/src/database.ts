@@ -10,6 +10,7 @@ import {
   type Observation,
   TagaError,
 } from '../../domain/src/index.js';
+import { adoptProjectIdentity, normalizeProjectKey } from '../../project-context/src/index.js';
 import { migrations, runMigrations, type Migration } from './migrations.js';
 
 type SqliteDatabase = Database.Database;
@@ -393,22 +394,35 @@ export class DatabaseStore {
       .map(({ value }) => parseObservation(JSON.parse(value) as unknown));
   }
 
-  saveProjectContext(project: Omit<StoredProjectContext, 'lastSeenAt'>): void {
+  /** Persists the project and returns its effective id: an existing record of the same repository
+   * under a different remote form (https vs ssh) is adopted so memories keep their binding. When
+   * several stored rows match, the one that actually owns memories wins, then the oldest. */
+  saveProjectContext(project: Omit<StoredProjectContext, 'lastSeenAt'>): string {
     const timestamp = this.now().toISOString();
-    const payload = JSON.stringify({ ...project, lastSeenAt: timestamp });
+    const incoming = normalizeProjectKey(project.canonicalKey);
+    const matchesRemote = (key: string | undefined): boolean => typeof key === 'string' && key.length > 0 && normalizeProjectKey(key) === incoming;
+    const memoryCount = this.database.prepare("SELECT COUNT(*) AS n FROM memories WHERE scope_kind = 'project' AND scope_id = ?");
+    const ranked = [...this.listProjectContexts()]
+      .filter((row) => row.id !== project.id && (matchesRemote(row.canonicalKey) || matchesRemote(row.gitRemote)))
+      .sort((left, right) =>
+        ((memoryCount.get(right.id) as { n: number } | undefined)?.n ?? 0) - ((memoryCount.get(left.id) as { n: number } | undefined)?.n ?? 0)
+        || (left.lastSeenAt ?? '').localeCompare(right.lastSeenAt ?? ''));
+    const adoptedId = adoptProjectIdentity(project, ranked).id;
+    const payload = JSON.stringify({ ...project, id: adoptedId, lastSeenAt: timestamp });
     this.database
       .prepare(
         `INSERT INTO projects (id, payload, updated_at) VALUES (?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`,
       )
-      .run(project.id, payload, timestamp);
+      .run(adoptedId, payload, timestamp);
     this.database
       .prepare(
         `INSERT INTO project_roots (project_id, local_path, first_seen_at, last_seen_at)
          VALUES (?, ?, ?, ?)
          ON CONFLICT(project_id, local_path) DO UPDATE SET last_seen_at = excluded.last_seen_at`,
       )
-      .run(project.id, project.root, timestamp, timestamp);
+      .run(adoptedId, project.root, timestamp, timestamp);
+    return adoptedId;
   }
 
   listProjectContexts(): readonly StoredProjectContext[] {

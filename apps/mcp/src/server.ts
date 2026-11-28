@@ -252,6 +252,13 @@ const MAX_SEARCH_RESULTS = 100;
 // Search results carry the start of the body, so reading a hit usually needs no second call.
 const SEARCH_BODY_MAX_CHARS = 600;
 const NO_PROJECT_CONTEXT = 'no project context: only global and domain memories were searched; call memory_session_start or pass project_id to include project memories';
+// Semantic distance for the near-duplicate gate, calibrated against BGE-M3 on real memories:
+// verbatim and reworded copies of an existing memory measure 0.013-0.07, a genuinely different
+// lesson on the same topic 0.16-0.24, and unrelated content 0.34+. The close-but-not-verbatim
+// band only counts as a duplicate when the title also agrees, so adjacent new lessons survive.
+const SEMANTIC_DUPLICATE_DISTANCE = 0.15;
+const SEMANTIC_NEAR_DUPLICATE_DISTANCE = 0.25;
+const DUPLICATE_TITLE_OVERLAP = 0.6;
 
 const tools: readonly McpTool[] = [
   { name: 'memory_search', version: 'v1', title: 'Search memories', annotations: READ_ONLY, description: 'Search active memories and return the id, title, and start of each matching body. Use it before solving a problem that earlier lessons, procedures, environment facts, or decisions could inform. match_reason explains why each result matched. candidate and draft memories are skipped unless include_draft=true. Zero results means nothing matched this wording, not that nothing was recorded: retry with other keywords or alternates before concluding.' },
@@ -259,7 +266,7 @@ const tools: readonly McpTool[] = [
   { name: 'memory_session_start', version: 'v1', title: 'Start session with context pack', annotations: STATEFUL, description: 'Call once at the start of a task, before other taga tools. It binds session_id to the project resolved from cwd and returns a bounded Context Pack: the active memories relevant to task, each with a [memory_id: ...] reference, plus decisions explaining what was excluded. Later calls that pass the same session_id inherit the project binding.' },
   { name: 'memory_session_observation', version: 'v1', title: 'Record session observation', annotations: APPEND_ONLY, description: 'Append a short, redacted observation to the session timeline (a problem, decision, procedure, preference, environment fact, or exploration). Use it for context worth keeping as history that does not deserve a memory_record. Never include secrets.' },
   { name: 'memory_get', version: 'v1', title: 'Read memory', annotations: READ_ONLY, description: "Read one memory's metadata: type, scope, status, title, summary, confidence, source_trust, tags, and sources. The body is only returned with include_body=true; use it when a search result or Context Pack entry was cut short." },
-  { name: 'memory_record', version: 'v1', title: 'Record memory', annotations: APPEND_ONLY, description: 'Save one reusable fact as a draft memory for review: a lesson (pitfall, root cause, fix), procedure, environment fact, project decision, or user preference. Do not record one-off details, intermediate steps, guesses, or secrets. Check memory_search first: if a close memory exists, give memory_feedback (kind conflict or not_useful) instead of duplicating it. Use knowledge_ingest for long user-provided documents. New memories are drafts: they are recalled only after `taga review` or consolidation activates them.' },
+  { name: 'memory_record', version: 'v1', title: 'Record memory', annotations: APPEND_ONLY, description: 'Save one reusable fact as a draft memory for review: a lesson (pitfall, root cause, fix), procedure, environment fact, project decision, or user preference. Do not record one-off details, intermediate steps, guesses, or secrets. A near-identical active memory is not written again: the result carries duplicate_of, and memory_feedback is the way to correct or confirm it. Use knowledge_ingest for long user-provided documents. New memories are drafts: they are recalled only after `taga review` or consolidation activates them.' },
   { name: 'memory_feedback', version: 'v1', title: 'Give memory feedback', annotations: APPEND_ONLY, description: 'Report how a memory worked out, by memory_id: useful (it helped), not_useful (irrelevant), conflict (wrong or outdated; say what is correct in note), verified (still correct), cite (referenced), or outcome (acting on it produced a result). Feedback adjusts confidence and drives promotion and staleness. Give it at the end of a task for the memories that mattered.' },
   { name: 'context_trace', version: 'v1', title: 'Trace context selection', annotations: READ_ONLY, description: 'Explain which memories a Context Pack would include, exclude, or truncate for a task, using the same selection as memory_session_start, and why. Use it when recall looks wrong.' },
   { name: 'memory_precheck', version: 'v1', title: 'Precheck before editing', annotations: APPEND_ONLY, description: 'Check for memories anchored to the file, symbol, or commit you are about to edit, before editing. Results carry anchor_state: valid means the memory references the file or symbol you named. Read valid items first; the others are ranked by keyword overlap and may be unrelated. Nothing is executed.' },
@@ -285,6 +292,25 @@ const taskGuidance: Readonly<Record<FeatureMode, string>> = {
 
 const mcpProtocolVersion = '2025-06-18';
 const serverInfo = { name: 'taga-mcp', version: '0.1.0' } as const;
+
+const retrievalModeClause: Readonly<Record<FeatureMode, string>> = {
+  off: 'Retrieval is lexical only (FTS5): query with space-separated keywords and exact identifiers.',
+  shadow: 'Retrieval is lexical (FTS5) with semantic observed: query with space-separated keywords and exact identifiers.',
+  on: 'Hybrid semantic retrieval is active: query with one natural-language sentence.',
+};
+
+// Protocol-level injection: clients surface this to the model at connection time, so recall does
+// not depend on the agent reading project instruction files.
+const mcpInstructions = (mode: FeatureMode): string => [
+  'Taga is a local-first long-term memory with governance: every write is audited, and agent-recorded memories activate only after review.',
+  'PROTOCOL:',
+  '1. BEFORE ANYTHING ELSE in a task, call memory_session_start (cwd=<agent cwd>, task=<one sentence on the task>, session_id=<unique, reused in later calls>). It binds the project and returns a Context Pack.',
+  '2. BEFORE SOLVING anything prior lessons may cover, call memory_search. Zero results: retry with other keywords, exact identifiers (commands, error codes, paths), or alternates before claiming "no records". Before editing a file or symbol, call memory_precheck with file/symbol and read anchor_state=valid items first.',
+  '3. WHEN a reusable lesson is confirmed (pitfall with root cause, verified fix, environment fact, user preference, decision), call memory_record with requested_status="draft". A result containing duplicate_of means a near-identical memory exists: give memory_feedback (conflict / not_useful) instead of recording again.',
+  '4. AT TASK END, give memory_feedback for the memories that mattered (useful) or were wrong (conflict / not_useful).',
+  'Never record secrets or one-off details. Say "recorded, pending review" — drafts are not recalled until `taga review` activates them.',
+  retrievalModeClause[mode],
+].join('\n');
 
 const toolInputSchemas: Readonly<Record<string, z.ZodType | undefined>> = {
   memory_search: searchInputSchema,
@@ -379,6 +405,7 @@ export class LiteMcpServer {
           protocolVersion: requested ?? mcpProtocolVersion,
           capabilities: { tools: { listChanged: false } },
           serverInfo,
+          instructions: mcpInstructions(this.config.retrieval.semantic.mode),
         },
       };
     }
@@ -742,10 +769,12 @@ export class LiteMcpServer {
         preferGitRoot: this.config.projectResolution.preferGitRoot,
         preferGitRemote: this.config.projectResolution.preferGitRemote,
       });
-      database.saveProjectContext(projectRecord(project));
+      // The session binds to the project's stable identity: a repo whose origin switched between
+      // https and ssh adopts the stored project instead of forking a phantom one.
+      const projectId = database.saveProjectContext(projectRecord(project));
       database.saveSessionContext({
         sessionId: parsed.session_id,
-        projectId: project.id,
+        projectId,
         projectRoot: project.root,
         cwd: project.cwd,
         agentId: parsed.agent_id,
@@ -754,7 +783,7 @@ export class LiteMcpServer {
       const result = await new SessionContextService(this.brainPath, database, this.clock).start({
         agentId: parsed.agent_id,
         sessionId: parsed.session_id,
-        projectId: project.id,
+        projectId,
         cwd: project.cwd,
         ...(parsed.task === undefined ? {} : { task: parsed.task }),
         ...(parsed.token_budget === undefined ? {} : { tokenBudget: parsed.token_budget }),
@@ -776,7 +805,7 @@ export class LiteMcpServer {
         reason: 'memory_session_start via MCP',
         payload: {
           agentId: parsed.agent_id,
-          projectId: project.id,
+          projectId,
           projectRoot: project.root,
           source: result.source,
           stale: result.stale,
@@ -797,7 +826,7 @@ export class LiteMcpServer {
         ok: true,
         data: {
           session_id: result.sessionId,
-          project_id: project.id,
+          project_id: projectId,
           project_root: project.root,
           project_name: project.name,
           project_source: project.source,
@@ -978,6 +1007,32 @@ export class LiteMcpServer {
       if (scope.kind === 'project' && projectId !== undefined && scope.id !== projectId) {
         throw new ToolError('CONFLICT', 'explicit project scope conflicts with session project', "Use scope 'auto', or record without session_id and pass the matching project_id.");
       }
+      // Structural quality gate: a near-identical active memory is not written again (the
+      // instruction to "search first" is enforced server-side instead of relying on the agent).
+      const duplicate = await this.findDuplicate(database, parsed.title, parsed.body, projectId);
+      if (duplicate !== undefined) {
+        await new SqliteAuditLog(database).append({
+          eventType: 'memory.record_deduplicated',
+          actor: parsed.actor,
+          subjectType: 'memory',
+          subjectId: duplicate.id,
+          occurredAt: this.clock().toISOString(),
+          reason: 'memory_record via MCP deduplicated against an existing active memory',
+          payload: { title: parsed.title, type: parsed.type },
+        });
+        return {
+          ok: true,
+          data: {
+            duplicate_of: duplicate.id,
+            duplicate_title: duplicate.title,
+            duplicate_status: duplicate.status,
+            action: 'not recorded: a near-identical memory already exists — use memory_feedback (kind=conflict or not_useful to correct it, kind=useful to confirm it) instead',
+          },
+          degraded: false,
+          warnings: [],
+          next_actions: [],
+        };
+      }
       const status = parsed.requested_status === 'active' ? 'draft' : parsed.requested_status;
       const now = this.clock().toISOString();
       const id = `mem-${randomUUID()}`;
@@ -1077,6 +1132,33 @@ export class LiteMcpServer {
     } finally {
       database.close();
     }
+  }
+
+  /**
+   * Near-duplicate detection for memory_record: hybrid retrieval against recallable memories,
+   * judged by semantic distance when available, otherwise by structural lexical match plus
+   * title-token overlap.
+   */
+  private async findDuplicate(database: DatabaseStore, title: string, body: string, projectId?: string): Promise<{ id: string; title: string; status: string } | undefined> {
+    const provider = new FtsRetrievalProvider(database);
+    const semantic = this.config.retrieval.semantic.mode === 'on' ? this.semanticRetriever(database) : undefined;
+    const result = await provider.searchHybrid({
+      query: `${title}\n${body.slice(0, 500)}`,
+      limit: 3,
+      ...(projectId === undefined ? {} : { scope: { kind: 'project' as const, id: projectId } }),
+    }, semantic);
+    const best = result.items[0];
+    if (best === undefined) return undefined;
+    if (result.semanticAvailable && best.semanticScore !== undefined) {
+      const distance = Math.max(0, 1 / best.semanticScore - 1);
+      const overlap = titleTokenOverlap(title, best.memory.title);
+      const verbatim = distance <= SEMANTIC_DUPLICATE_DISTANCE
+        || distance <= SEMANTIC_NEAR_DUPLICATE_DISTANCE && overlap >= DUPLICATE_TITLE_OVERLAP;
+      return verbatim ? { id: best.memory.id, title: best.memory.title, status: best.memory.status } : undefined;
+    }
+    const overlap = titleTokenOverlap(title, best.memory.title);
+    const structural = best.matchReason.includes('match:phrase') || best.matchReason.includes('match:strict');
+    return structural && overlap >= DUPLICATE_TITLE_OVERLAP ? { id: best.memory.id, title: best.memory.title, status: best.memory.status } : undefined;
   }
 
   private async readMemoryFiles(): Promise<MemoryFile[]> {
@@ -1207,6 +1289,17 @@ function searchResult(item: RecallCandidate | HybridRecallCandidate, catalog: Re
 
 function clipBody(text: string, maxChars: number): { readonly text: string; readonly truncated: boolean } {
   return text.length <= maxChars ? { text, truncated: false } : { text: `${text.slice(0, maxChars)}…`, truncated: true };
+}
+
+/** Share of the record's title tokens that also appear in the existing title; 1 = same tokens. */
+function titleTokenOverlap(recordTitle: string, existingTitle: string): number {
+  const tokenize = (value: string): Set<string> => new Set(value.normalize('NFKC').toLocaleLowerCase().split(/[^\p{L}\p{N}_-]+/u).filter((token) => token.length > 1));
+  const record = tokenize(recordTitle);
+  if (record.size === 0) return 0;
+  const existing = tokenize(existingTitle);
+  let shared = 0;
+  for (const token of record) if (existing.has(token)) shared += 1;
+  return shared / record.size;
 }
 
 function zeroResultHint(hybrid: boolean): string {

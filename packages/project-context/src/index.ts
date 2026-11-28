@@ -66,8 +66,46 @@ export function stableProjectId(identity: string): string {
   return `project-${contentHash(identity).slice(-16)}`;
 }
 
+/**
+ * Normalizes any git remote form (https / http / ssh URL, scp-style git@host:path) to the
+ * transport-free `host/path` identity, so switching the remote protocol never changes a
+ * project's stable identity.
+ */
 export function normalizeGitRemote(remote: string): string {
-  return remote.trim().toLowerCase().replace(/\.git$/u, '');
+  const trimmed = remote.trim().toLowerCase().replace(/\.git$/u, '');
+  const scp = /^[\w.~-]+@([^/:]+):(.+)$/u.exec(trimmed);
+  if (scp !== null) return `${scp[1]}/${scp[2]}`;
+  const url = /^[a-z][a-z0-9+.-]*:\/\/(?:[^/@]*@)?([^/@]+)\/(.+)$/u.exec(trimmed);
+  if (url !== null) return `${url[1]}/${url[2]}`;
+  return trimmed;
+}
+
+/** Normalizes a stored canonical key, which may carry a monorepo `#relative/path` suffix. */
+export function normalizeProjectKey(key: string): string {
+  const hash = key.indexOf('#');
+  if (hash < 0) return normalizeGitRemote(key);
+  return `${normalizeGitRemote(key.slice(0, hash))}${key.slice(hash)}`;
+}
+
+export interface StoredProjectIdentity {
+  readonly id: string;
+  readonly canonicalKey?: string;
+  readonly gitRemote?: string;
+}
+
+/**
+ * Reuses an already-stored project id when the resolved identity is the same repository in a
+ * different remote form (for example after switching origin between https and ssh), so existing
+ * memories stay attached instead of splitting into a phantom project.
+ */
+export function adoptProjectIdentity<T extends { readonly id: string; readonly canonicalKey: string }>(project: T, known: readonly StoredProjectIdentity[]): T {
+  const incoming = normalizeProjectKey(project.canonicalKey);
+  const match = known.find((candidate) => {
+    if (candidate.id === project.id) return false;
+    const keys = [candidate.canonicalKey, candidate.gitRemote].filter((value): value is string => typeof value === 'string' && value.length > 0);
+    return keys.some((key) => normalizeProjectKey(key) === incoming);
+  });
+  return match === undefined ? project : { ...project, id: match.id };
 }
 
 async function findGitRoot(path: string): Promise<string | undefined> {

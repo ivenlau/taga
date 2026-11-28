@@ -65,6 +65,9 @@ describe('L2 polish on acceptance', () => {
     const review = new ReviewService(candidates, new InMemoryMemoryRepository(), new InMemoryAuditLog(), undefined, new PolishService(provider, 'test-model', 1000));
     const memory = await review.accept(candidate.id, { actor: 'user' }, 'accept for polish');
     expect(calls).toHaveLength(1);
+    // The polisher anchors relative time to the observation date, not to today.
+    expect(calls[0]).toContain('observationDate');
+    expect(calls[0]).toContain('2026-11-27T00:00:00.000Z');
     expect(memory.title).toBe('泛化后的标题');
     expect(memory.summary).toBe('泛化后的摘要，含适用边界。');
   });

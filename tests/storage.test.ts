@@ -3,6 +3,24 @@ import { DatabaseStore } from '../packages/storage/src/index.js';
 import { createTemporaryDirectory } from '../packages/testkit/src/index.js';
 
 describe('DatabaseStore', () => {
+  it('adopts a stored project when the remote form changes and returns the stable id', async () => {
+    const fixture = await createTemporaryDirectory();
+    const database = new DatabaseStore(`${fixture.path}/taga.db`);
+    const first = database.saveProjectContext({ id: 'project-legacy', root: '/repo', name: 'repo', source: 'git-origin', canonicalKey: 'https://github.com/example/repo', gitRemote: 'https://github.com/example/repo.git' });
+    expect(first).toBe('project-legacy');
+
+    // Same repository, origin switched to scp form with a freshly derived id: the stored
+    // project is adopted so memories keep their binding, and the row carries the new key.
+    const switched = database.saveProjectContext({ id: 'project-fresh', root: '/repo', name: 'repo', source: 'git-origin', canonicalKey: 'git@github.com:example/repo', gitRemote: 'git@github.com:example/repo.git' });
+    expect(switched).toBe('project-legacy');
+    const projects = database.listProjectContexts();
+    expect(projects).toHaveLength(1);
+    expect(projects[0]?.id).toBe('project-legacy');
+    expect(projects[0]?.canonicalKey).toBe('git@github.com:example/repo');
+    database.close();
+    await fixture.cleanup();
+  });
+
   it('runs migrations idempotently and reports healthy integrity', async () => {
     const fixture = await createTemporaryDirectory();
     const databasePath = `${fixture.path}/taga.db`;

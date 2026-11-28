@@ -317,7 +317,9 @@ claude mcp add --scope user taga -- taga-mcp   # Claude Code
 codex mcp add taga -- taga-mcp                 # Codex
 ```
 
-工具描述会随生效的检索模式变化：语义检索关闭时提示 agent 使用关键词和标识符查询，开启时提示使用自然语言句子。
+工具描述会随生效的检索模式变化：语义检索关闭时提示 agent 使用关键词和标识符查询，开启时提示使用自然语言句子。`initialize` 响应还带 `instructions` 字段——把"先 session_start、动手前先查、确认经验就记、收尾反馈"的核心循环注入给模型，召回时机不依赖项目指令文件。
+
+`memory_record` 在服务端做查重：与 active 记忆近乎相同的写入会被拒绝并返回 `duplicate_of`（阈值按 BGE-M3 实测距离校准，改写重复会被拦截，同话题的不同新知正常放行），此时应改用 `memory_feedback` 纠错或确认。
 
 Agent 开始会话时应传入实际工作目录：
 

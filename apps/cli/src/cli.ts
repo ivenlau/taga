@@ -643,8 +643,7 @@ async function developmentCommand(subcommand: string | undefined, positionals: r
     const service = new DevelopmentEvidenceService(database);
     const project = await resolveCliProject(context);
     const projectPath = project.root;
-    const projectId = project.id;
-    database.saveProjectContext(projectRecord(project));
+    const projectId = database.saveProjectContext(projectRecord(project));
     if (subcommand === 'probe') {
       return { ok: true, code: 'DEVELOPMENT_PROBED', message: 'environment probe completed', data: await service.probeEnvironment(projectPath, projectId) };
     }
@@ -1112,12 +1111,12 @@ async function contextCommand(subcommand: string | undefined, context: CliContex
     if (sessionId === undefined) throw new CliFailure(exitCodes.invalidInput, 'INVALID_INPUT', 'context start requires --session-id=<id>');
     const database = new DatabaseStore(context.databasePath);
     try {
-      database.saveProjectContext(projectRecord(project));
-      database.saveSessionContext({ sessionId, projectId: project.id, projectRoot: project.root, cwd: project.cwd, agentId: optionString(context.options, 'agent') ?? 'local', source: project.source });
+      const projectId = database.saveProjectContext(projectRecord(project));
+      database.saveSessionContext({ sessionId, projectId, projectRoot: project.root, cwd: project.cwd, agentId: optionString(context.options, 'agent') ?? 'local', source: project.source });
       const result = await new SessionContextService(context.brainPath, database).start({
         agentId: optionString(context.options, 'agent') ?? 'local',
         sessionId,
-        projectId: project.id,
+        projectId,
         ...(optionString(context.options, 'task') === undefined ? {} : { task: optionString(context.options, 'task') as string }),
         cwd: context.cwd,
         refresh: context.options.get('refresh') === true,

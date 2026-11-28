@@ -21,8 +21,11 @@ const POLISH_SYSTEM_PROMPT = [
   'You are Taga memory polishing.',
   'Rewrite the draft memory into one durable, reusable lesson: keep every fact faithful to the draft (never invent),',
   'state applicability boundaries (when the lesson does and does not hold), and remove session-specific noise.',
-  'Title: at most 60 characters, a generalized lesson statement.',
-  'Summary: 1-3 sentences carrying the lesson and its applicability; keep the draft language.',
+  'Title: one atomic, self-contained lesson statement of at most 60 characters, understandable without the session context.',
+  'Keep concrete identifiers from the draft (commands, error codes, paths). No category labels or prefixes.',
+  'Summary: 1-3 sentences carrying the lesson and its applicability.',
+  'Write title and summary in the same language as the draft (mirror it).',
+  'Resolve relative time expressions (今天, 昨天, last week, just now) against the provided observation date, never against today.',
   'Return one JSON object {"title": "...", "summary": "...", "confidence": 0..1} and nothing else.',
 ].join(' ');
 
@@ -40,6 +43,7 @@ export class PolishService implements CandidatePolisher {
         system: POLISH_SYSTEM_PROMPT,
         user: JSON.stringify({
           memoryType: candidate.memoryType,
+          observationDate: candidate.createdAt ?? null,
           draft: { title: candidate.title, summary: candidate.summary, body: candidate.body },
           outputSchema: { title: 'string (<=60 chars)', summary: 'string (1-3 sentences)', confidence: 'number 0..1' },
         }),

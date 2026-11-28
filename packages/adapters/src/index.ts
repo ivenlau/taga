@@ -10,15 +10,16 @@ import Database from 'better-sqlite3';
 const execFileAsync = promisify(execFile);
 
 export const DEFAULT_AGENT_INSTRUCTIONS = [
-  '## Taga 长期记忆（taga-mcp）',
+  '## Taga 长期记忆（taga-mcp）——会话协议',
   '',
-  '本会话接入了 Taga 本地记忆库（MCP 服务器 `taga`，工具以 `memory_` / `brain_` / `context_` 开头）。**仅当本会话实际能调用这些工具时**才执行以下约定，否则忽略本节。参数细节见各工具说明。',
+  '本会话接入了 Taga 本地记忆库（MCP 服务器 `taga`，工具以 `memory_` / `brain_` / `context_` 开头）。**仅当本会话实际能调用这些工具时**执行以下协议，否则忽略本节。参数细节见各工具说明。',
   '',
-  '1. **开始任务**：调用 `memory_session_start`，传入当前工作目录 `cwd` 和一句话 `task`（用户这次要做什么，它是召回的检索词）。`session_id` 自拟一个唯一值（如 `日期-项目-随机后缀`），之后的调用沿用。',
-  '2. **需要过去的经验时先查**：`memory_search` 的 `query` 先写一句自然描述；零结果或只有词法结果时，换成空格分隔的关键词、原文里的标识符（命令、错误码、路径）或 `alternates`（最多 6 个同义或中英变体）。换 2 种写法仍无结果，才可以说"没有记录"。一次性的小改动不必查。修改文件或符号之前，先用 `memory_precheck` 传入 `file` / `symbol`，优先看 `anchor_state` 为 valid 的条目。',
-  '3. **产生可复用的经验时记**：先 `memory_search` 确认没有相近记忆，再调用 `memory_record`（`requested_status` 传 `"draft"`，`actor` 传 `"agent"`，传当前 `session_id`，`scope` 用 `"auto"`）；已有相近记忆就改用 `memory_feedback`（kind=conflict 或 not_useful）。`title` 写成自包含的一句话，`body` 带具体标识符，`sources` 至少一条；涉及具体文件或符号时给出 `anchors`（`memory_precheck` 靠它召回）。类型在 `preferences`（偏好）、`environment`（环境）、`procedures`（步骤）、`lessons`（踩坑，拿不准选它）、`projects`（决策）中选。',
-  '4. **宁缺毋滥**：只记可复用的事实，不记一次性细节、中间过程和猜测；机密信息一律不进记忆。新记忆是 draft，经 `taga review` 审核后才进入召回，对用户说"已记录待审核"。用户口述的大段材料改用 `knowledge_ingest` 入队蒸馏。',
-  '5. **任务收尾时反馈**：对确实帮到你的记忆调用 `memory_feedback`（kind=useful），过时或有误的用 conflict 或 not_useful。工具返回 `warnings` 或 `degraded` 时如实转达用户。',
+  '0. **假设中断**：上下文可能随时被重置；只有写入 Taga 的内容能跨会话存活。"记下来"不能等收尾——踩到坑、找到根因、确认方案时就地记录。',
+  '1. **任务开始（先于其它操作）**：调用 `memory_session_start`，传入 `cwd`（当前工作目录）、`task`（一句话说明用户这次要做什么，它是召回检索词）、自拟唯一 `session_id`（如 `日期-项目-后缀`），之后的调用沿用。',
+  '2. **动手前先查**：任务可能已有经验（踩坑、流程、环境、决策）时先 `memory_search`：语义开启时 `query` 写一句自然描述；零结果或只有词法命中时，换成空格分隔的关键词、原文里的标识符（命令、错误码、路径）或 `alternates`（最多 6 个变体）。换 2 种写法仍无结果，才可以说"没有记录"。修改文件或符号之前调用 `memory_precheck`（传 `file` / `symbol`），优先处理 `anchor_state` 为 valid 的条目。',
+  '3. **确认了可复用经验就记**：先 `memory_search` 确认无相近记忆，再调用 `memory_record`（`requested_status` 传 `"draft"`，`actor` 传 `"agent"`，传当前 `session_id`，`scope` 用 `"auto"`）。返回 `duplicate_of` 表示已有相近记忆：改用 `memory_feedback`（kind=conflict 或 not_useful 纠错）补充，不要重复写。`title` 是自包含的一句话，`body` 带具体标识符，`sources` 至少一条；涉及具体文件或符号时给 `anchors`（`memory_precheck` 靠它召回）。类型五选一：`preferences`（偏好）、`environment`（环境）、`procedures`（步骤）、`lessons`（踩坑，拿不准选它）、`projects`（决策）。',
+  '4. **不记**：一次性细节、中间过程、猜测；**机密一律不进记忆**。用户口述的大段材料改用 `knowledge_ingest` 入队蒸馏。新记忆是 draft，经 `taga review` 审核后才进入召回——对用户说"已记录待审核"。',
+  '5. **任务收尾**：对确实帮到你的记忆调用 `memory_feedback`（kind=useful），过时或有误的用 conflict 或 not_useful。工具返回 `warnings` 或 `degraded` 时如实转达用户。',
 ].join('\n');
 
 export const MCP_SERVER_NAME = 'taga';
